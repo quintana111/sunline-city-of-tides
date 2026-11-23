@@ -28,7 +28,7 @@ Open http://localhost:8080 in desktop Chrome (or serve `game/` with any static s
 
 - **City** — seeded 10×10-block coastal city, ~250 buildings, palms, beach and marina, warm sunset light
 - **Driving** — 5 car models, arcade handling, chase camera; steal any car with E
-- **Traffic & pedestrians** — 26 traffic cars + 64 pedestrians with day routines
+- **Traffic & pedestrians** — 26 traffic cars + 55 pedestrians with sidewalk loops
 - **Wanted & police** — 0–5 stars; crimes are witnessed and reported, cruisers pursue and ram, escape to cool off
 - **Missions & story** — 4 story missions (First Light Run, Harbour Receipt, Wrong Turn, Last Ferry) with timers, gold beacons and dialogue from Mara
 - **Combat** — punches and hitscan shooting, pedestrians react and recover

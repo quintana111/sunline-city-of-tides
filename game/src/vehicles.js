@@ -1,311 +1,652 @@
-// Vehicle models + arcade driving. Five original models, box-built.
-// Written fresh 2026-11-24 (Builder A re-author).
-// Forward = (sin h, 0, -cos h); every car mesh uses rotation.y = -heading,
-// so the car's local -Z (headlights) always points along travel direction.
 import * as THREE from 'three';
 
-const VEHICLE_TYPES = {
-  sedan: { name: 'Morrow Compact', length: 4.4, width: 1.82, topSpeed: 24, accel: 12, color: 0x687f7d, cabin: 0xb7c8c1, style: 'sedan' },
-  taxi: { name: 'Sunbird Cab', length: 4.5, width: 1.86, topSpeed: 22, accel: 12, color: 0xe8bc36, cabin: 0x344249, style: 'taxi' },
-  sports: { name: 'Kestrel R', length: 4.5, width: 1.94, topSpeed: 34, accel: 12, color: 0xd9544e, cabin: 0x382f37, style: 'sports' },
-  truck: { name: 'Docksider', length: 5.8, width: 2.08, topSpeed: 19, accel: 8, color: 0xe4ddc9, cabin: 0x9eaca6, style: 'truck' },
-  police: { name: 'Civic Sentinel', length: 4.8, width: 1.9, topSpeed: 26, accel: 12, color: 0x172b47, cabin: 0xe8e8e1, style: 'police' },
-};
-const CAR_RADIUS = 1.3;
+const MODEL_KEYS = new Set(['sedan', 'taxi', 'sports', 'truck', 'police']);
+const DISPLAY_NAME_TO_KEY = new Map([
+  ['morrow compact', 'sedan'],
+  ['sunbird cab', 'taxi'],
+  ['kestrel r', 'sports'],
+  ['docksider', 'truck'],
+  ['civic sentinel', 'police']
+]);
 
-const DISPLAY_NAMES = {
-  'Morrow Compact': 'sedan',
-  'Sunbird Cab': 'taxi',
-  'Kestrel R': 'sports',
-  'Docksider': 'truck',
-  'Civic Sentinel': 'police',
+const MODEL_INFO = {
+  sedan: {
+    name: 'Morrow Compact',
+    body: 0x536a70,
+    cabin: 0x9aaeb0,
+    length: 4.4,
+    width: 1.82,
+    height: 1.12,
+    topSpeed: 24
+  },
+  taxi: {
+    name: 'Sunbird Cab',
+    body: 0xe8b62f,
+    cabin: 0xf4d66f,
+    length: 4.4,
+    width: 1.84,
+    height: 1.16,
+    topSpeed: 22
+  },
+  sports: {
+    name: 'Kestrel R',
+    body: 0xc9403d,
+    cabin: 0xe47768,
+    length: 4.35,
+    width: 1.9,
+    height: 0.88,
+    topSpeed: 34
+  },
+  truck: {
+    name: 'Docksider',
+    body: 0xd8d0b7,
+    cabin: 0xede5d0,
+    length: 5.8,
+    width: 2.05,
+    height: 1.42,
+    topSpeed: 19
+  },
+  police: {
+    name: 'Civic Sentinel',
+    body: 0x192c49,
+    cabin: 0xe7e8df,
+    length: 4.6,
+    width: 1.9,
+    height: 1.18,
+    topSpeed: 26
+  }
 };
-export function resolveType(type) {
-  if (type in VEHICLE_TYPES) return type;
-  if (type in DISPLAY_NAMES) return DISPLAY_NAMES[type];
+
+let vehicleScene = null;
+
+function resolveModelKey(type) {
+  if (MODEL_KEYS.has(type)) return type;
+  if (typeof type === 'string') {
+    const normalized = type.trim().toLowerCase();
+    if (MODEL_KEYS.has(normalized)) return normalized;
+    return DISPLAY_NAME_TO_KEY.get(normalized) ?? 'sedan';
+  }
   return 'sedan';
 }
 
-// Seeded RNG (mulberry32) — deterministic parked-car placement, no Math.random.
 function mulberry32(seed) {
-  let v = seed >>> 0;
+  let value = seed >>> 0;
   return function random() {
-    v += 0x6d2b79f5;
-    let t = v;
+    value += 0x6D2B79F5;
+    let t = value;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-function forwardForHeading(heading) {
-  return new THREE.Vector3(Math.sin(heading), 0, -Math.cos(heading));
+function normalizeAngle(angle) {
+  while (angle > Math.PI) angle -= Math.PI * 2;
+  while (angle < -Math.PI) angle += Math.PI * 2;
+  return angle;
 }
 
-// Lane heading: axis 'x' = road runs east-west, lane +4.5 is eastbound.
-function headingForLane(axis, lane) {
-  if (axis === 'x') return lane > 0 ? Math.PI / 2 : -Math.PI / 2;
-  return lane > 0 ? 0 : Math.PI;
-}
-
-function mat(color, options = {}) {
-  return new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.05, ...options });
-}
-
-function addBox(parent, size, color, pos, options = {}) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), mat(color, options));
-  mesh.position.set(pos[0], pos[1], pos[2]);
+function addBox(parent, material, x, y, z, width, height, depth) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(width, height, depth),
+    material
+  );
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   parent.add(mesh);
   return mesh;
 }
 
-function insideBuilding(b, x, z, r) {
-  const hw = (Number(b.w) || 0) * 0.5 + r;
-  const hd = (Number(b.d) || 0) * 0.5 + r;
-  return Math.abs(x - b.x) < hw && Math.abs(z - b.z) < hd;
+function makeMaterial(color, options = {}) {
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: options.roughness ?? 0.75,
+    metalness: options.metalness ?? 0.08,
+    emissive: options.emissive ?? 0x000000,
+    emissiveIntensity: options.emissiveIntensity ?? 0
+  });
 }
 
-function hitsBuilding(world, x, z, radius = CAR_RADIUS) {
-  if (!world || !Array.isArray(world.buildings)) return false;
-  return world.buildings.some((b) => b && insideBuilding(b, x, z, radius));
-}
-
-function clampWorld(world, x, z) {
-  let out = { x, z };
-  if (world && typeof world.clampToCity === 'function') {
-    const c = world.clampToCity(x, z);
-    if (c && typeof c === 'object') out = { x: c.x, z: c.z };
-  }
-  if (z > 580) out.z = Math.min(680, z);
-  return out;
-}
-
-function makeWheel(holder, radius, width) {
-  const roll = new THREE.Group();
-  holder.add(roll);
-  const tire = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius, radius, width, 10, 1),
-    mat(0x25282b, { roughness: 0.95 }),
-  );
-  tire.rotation.z = Math.PI / 2;
-  roll.add(tire);
-  const hub = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.48, radius * 0.48, width + 0.015, 8, 1),
-    mat(0x9da4a2, { metalness: 0.48, roughness: 0.44 }),
-  );
-  hub.rotation.z = Math.PI / 2;
-  roll.add(hub);
-  return { wheelGroup: holder, rollGroup: roll };
-}
-
-function buildCarModel(type, config) {
+function createVehicleVisual(vehicle, scene) {
+  const key = resolveModelKey(vehicle.type);
+  const info = MODEL_INFO[key];
   const group = new THREE.Group();
-  group.name = config.name;
-  const { length, width } = config;
-  const isTruck = config.style === 'truck';
-  const bodyH = isTruck ? 0.62 : config.style === 'sports' ? 0.43 : 0.52;
-  const bodyY = isTruck ? 0.66 : 0.62;
+  group.name = info.name;
 
-  addBox(group, [width, bodyH, length], config.color, [0, bodyY, 0]);
-  if (isTruck) {
-    addBox(group, [width * 0.88, 0.9, 2.15], config.cabin, [0, 1.38, -1.17]); // cab, front
-    addBox(group, [width * 0.96, 0.66, 2.48], 0xb7b09e, [0, 0.99, 1.52]); // cargo bed
-    addBox(group, [0.12, 0.7, 2.42], 0xc9c2af, [-width * 0.45, 1.02, 1.52]);
-    addBox(group, [0.12, 0.7, 2.42], 0xc9c2af, [width * 0.45, 1.02, 1.52]);
+  const bodyMaterial = makeMaterial(info.body, { roughness: 0.7 });
+  const cabinMaterial = makeMaterial(info.cabin, { roughness: 0.56 });
+  const glassMaterial = makeMaterial(0x38515c, {
+    roughness: 0.3,
+    metalness: 0.15
+  });
+  const darkMaterial = makeMaterial(0x20252a, { roughness: 0.88 });
+  const wheelMaterial = makeMaterial(0x17191c, { roughness: 0.96 });
+  const trimMaterial = makeMaterial(0xb9c2c0, { metalness: 0.45 });
+  const headlightMaterial = makeMaterial(0xfff1c4, {
+    emissive: 0xffdf86,
+    emissiveIntensity: 0.7
+  });
+  const tailMaterial = makeMaterial(0xa51e20, {
+    emissive: 0xff1717,
+    emissiveIntensity: 0.45
+  });
+
+  const length = info.length;
+  const width = info.width;
+  const baseHeight = info.height;
+  const wheelRadius = key === 'truck' ? 0.39 : 0.34;
+  const bodyY = baseHeight * 0.48;
+  const bodyDepth = key === 'truck' ? length * 0.52 : length * 0.76;
+
+  addBox(
+    group,
+    bodyMaterial,
+    0,
+    bodyY,
+    key === 'truck' ? length * 0.08 : 0,
+    width,
+    baseHeight * 0.48,
+    bodyDepth
+  );
+
+  if (key === 'truck') {
+    const cabLength = length * 0.38;
+    addBox(
+      group,
+      cabinMaterial,
+      0,
+      baseHeight * 0.91,
+      -length * 0.32,
+      width * 0.91,
+      baseHeight * 0.76,
+      cabLength
+    );
+    addBox(
+      group,
+      glassMaterial,
+      0,
+      baseHeight * 1.05,
+      -length * 0.32 - cabLength * 0.51,
+      width * 0.72,
+      baseHeight * 0.34,
+      0.035
+    );
+    addBox(
+      group,
+      bodyMaterial,
+      0,
+      baseHeight * 0.77,
+      length * 0.29,
+      width * 0.9,
+      0.08,
+      length * 0.42
+    );
+    addBox(
+      group,
+      darkMaterial,
+      0,
+      baseHeight * 1.18,
+      length * 0.29,
+      width * 0.92,
+      0.055,
+      length * 0.4
+    );
   } else {
-    const cabinLen = config.style === 'sports' ? 2.05 : 2.38;
-    const cabinY = config.style === 'sports' ? 1.0 : 1.12;
-    addBox(group, [width * 0.78, config.style === 'sports' ? 0.54 : 0.66, cabinLen], config.cabin, [0, cabinY, -0.05]);
-    addBox(group, [width * 0.7, 0.35, 0.035], 0x8ba5a5, [0, cabinY + 0.02, -cabinLen * 0.5 - 0.02]);
-    addBox(group, [width * 0.7, 0.34, 0.035], 0x819b9d, [0, cabinY + 0.02, cabinLen * 0.5 + 0.02]);
-    addBox(group, [0.035, 0.32, cabinLen * 0.7], 0x829c9e, [-width * 0.4, cabinY + 0.02, -0.02]);
-    addBox(group, [0.035, 0.32, cabinLen * 0.7], 0x829c9e, [width * 0.4, cabinY + 0.02, -0.02]);
-  }
-  if (type === 'taxi') {
-    addBox(group, [0.54, 0.14, 0.34], 0xf6e9b4, [0, 1.61, -0.04]); // roof sign
-    addBox(group, [0.32, 0.1, 0.025], 0x262e30, [0, 1.62, -0.22]);
-  }
-  if (type === 'sports') {
-    addBox(group, [width * 0.9, 0.1, 0.16], 0x242a2f, [0, 0.99, 1.93]); // spoiler, rear
-    addBox(group, [0.1, 0.3, 0.12], 0x242a2f, [-width * 0.36, 0.84, 1.91]);
-    addBox(group, [0.1, 0.3, 0.12], 0x242a2f, [width * 0.36, 0.84, 1.91]);
-  }
-  if (type === 'police') {
-    addBox(group, [width * 0.96, 0.22, 2.05], 0xe9e9e2, [0, 0.87, 0.12]);
-    const red = addBox(group, [0.28, 0.16, 0.22], 0xff2525, [-0.2, 1.55, 0], { emissive: 0x9b0808, emissiveIntensity: 1.3 });
-    const blue = addBox(group, [0.28, 0.16, 0.22], 0x2c64ff, [0.2, 1.55, 0], { emissive: 0x102cbb, emissiveIntensity: 1.3 });
-    red.name = 'redLight';
-    blue.name = 'blueLight';
+    const cabinLength = key === 'sports' ? length * 0.44 : length * 0.5;
+    const cabinHeight = key === 'sports' ? 0.46 : baseHeight * 0.58;
+    const cabinY = bodyY + baseHeight * 0.39;
+    addBox(
+      group,
+      cabinMaterial,
+      0,
+      cabinY,
+      -length * 0.045,
+      width * (key === 'sports' ? 0.76 : 0.82),
+      cabinHeight,
+      cabinLength
+    );
+
+    const glassHeight = cabinHeight * 0.53;
+    const glassZFront = -length * 0.045 - cabinLength * 0.51;
+    const glassZRear = -length * 0.045 + cabinLength * 0.51;
+    addBox(
+      group,
+      glassMaterial,
+      0,
+      cabinY + cabinHeight * 0.08,
+      glassZFront,
+      width * 0.62,
+      glassHeight,
+      0.035
+    );
+    addBox(
+      group,
+      glassMaterial,
+      0,
+      cabinY + cabinHeight * 0.08,
+      glassZRear,
+      width * 0.62,
+      glassHeight,
+      0.035
+    );
+    addBox(
+      group,
+      darkMaterial,
+      0,
+      cabinY + cabinHeight * 0.51,
+      -length * 0.045,
+      width * 0.71,
+      0.035,
+      cabinLength * 0.72
+    );
   }
 
-  // Headlights front (-Z local), taillights rear (+Z local).
-  const headMat = mat(0xfff4cf, { emissive: 0xc9a853, emissiveIntensity: 0.45 });
-  const tailMat = mat(0xe34a40, { emissive: 0x8e100d, emissiveIntensity: 0.65 });
-  const headGeo = new THREE.BoxGeometry(0.34, 0.16, 0.08);
-  const tailGeo = new THREE.BoxGeometry(0.28, 0.16, 0.08);
-  for (const side of [-1, 1]) {
-    const head = new THREE.Mesh(headGeo, headMat);
-    head.position.set(side * (width * 0.35), bodyY + 0.02, -length * 0.5 - 0.035);
-    group.add(head);
-    const tail = new THREE.Mesh(tailGeo, tailMat);
-    tail.position.set(side * (width * 0.35), bodyY + 0.03, length * 0.5 + 0.035);
-    group.add(tail);
+  if (key === 'taxi') {
+    addBox(
+      group,
+      makeMaterial(0xf5e9c3, { roughness: 0.8 }),
+      0,
+      baseHeight * 1.27,
+      -0.12,
+      0.48,
+      0.16,
+      0.3
+    );
+    addBox(
+      group,
+      makeMaterial(0x242b2b, { roughness: 0.8 }),
+      0,
+      baseHeight * 1.37,
+      -0.12,
+      0.35,
+      0.035,
+      0.2
+    );
   }
 
-  const wheels = { front: [], all: [] };
-  const wheelR = isTruck ? 0.43 : 0.36;
-  const wheelW = isTruck ? 0.28 : 0.22;
-  const frontZ = -length * 0.31;
-  const rearZ = length * 0.32;
+  if (key === 'sports') {
+    addBox(
+      group,
+      bodyMaterial,
+      0,
+      baseHeight * 0.9,
+      length * 0.39,
+      width * 0.92,
+      0.075,
+      0.15
+    );
+    addBox(
+      group,
+      darkMaterial,
+      0,
+      baseHeight * 1.17,
+      length * 0.39,
+      width * 0.78,
+      0.07,
+      0.06
+    );
+  }
+
+  if (key === 'police') {
+    addBox(
+      group,
+      makeMaterial(0xf1f0e6, { roughness: 0.75 }),
+      0,
+      bodyY + baseHeight * 0.27,
+      0,
+      width * 1.01,
+      baseHeight * 0.22,
+      length * 0.53
+    );
+    const redLight = makeMaterial(0xff2635, {
+      emissive: 0xff0011,
+      emissiveIntensity: 1.5
+    });
+    const blueLight = makeMaterial(0x247dff, {
+      emissive: 0x002eff,
+      emissiveIntensity: 1.5
+    });
+    addBox(group, redLight, -0.22, baseHeight * 1.32, -0.06, 0.24, 0.13, 0.22);
+    addBox(group, blueLight, 0.22, baseHeight * 1.32, -0.06, 0.24, 0.13, 0.22);
+  }
+
   for (const side of [-1, 1]) {
-    for (const z of [frontZ, rearZ]) {
-      const holder = new THREE.Group();
-      holder.position.set(side * (width * 0.5 + 0.015), wheelR, z);
-      group.add(holder);
-      const wheel = makeWheel(holder, wheelR, wheelW);
-      const rec = { ...wheel, front: z === frontZ };
-      wheels.all.push(rec);
-      if (rec.front) wheels.front.push(rec);
+    addBox(
+      group,
+      headlightMaterial,
+      side * width * 0.34,
+      bodyY + 0.01,
+      -length * 0.5 - 0.015,
+      0.22,
+      0.14,
+      0.045
+    );
+    addBox(
+      group,
+      tailMaterial,
+      side * width * 0.34,
+      bodyY + 0.015,
+      length * 0.5 + 0.015,
+      0.22,
+      0.15,
+      0.045
+    );
+    addBox(
+      group,
+      trimMaterial,
+      side * width * 0.505,
+      bodyY - 0.08,
+      0,
+      0.025,
+      0.08,
+      length * 0.58
+    );
+  }
+
+  const allWheels = [];
+  const frontWheels = [];
+  const axleZ = key === 'truck' ? length * 0.34 : length * 0.32;
+  for (const side of [-1, 1]) {
+    for (const axle of [-1, 1]) {
+      const steeringPivot = new THREE.Group();
+      steeringPivot.position.set(
+        side * (width * 0.5 - 0.04),
+        wheelRadius,
+        axle * axleZ
+      );
+      group.add(steeringPivot);
+
+      const wheel = new THREE.Mesh(
+        new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.22, 10),
+        wheelMaterial
+      );
+      wheel.rotation.z = Math.PI / 2;
+      wheel.castShadow = true;
+      wheel.receiveShadow = true;
+      steeringPivot.add(wheel);
+
+      const hub = new THREE.Mesh(
+        new THREE.CylinderGeometry(wheelRadius * 0.38, wheelRadius * 0.38, 0.23, 8),
+        trimMaterial
+      );
+      hub.rotation.z = Math.PI / 2;
+      steeringPivot.add(hub);
+
+      const wheelData = { pivot: steeringPivot, mesh: wheel, hub, front: axle < 0 };
+      allWheels.push(wheelData);
+      if (axle < 0) frontWheels.push(wheelData);
     }
   }
-  return { group, wheels };
+
+  group.position.set(vehicle.pos.x, vehicle.pos.y ?? 0, vehicle.pos.z);
+  group.rotation.y = -vehicle.heading;
+  scene.add(group);
+
+  vehicle.type = key;
+  vehicle.group = group;
+  vehicle.wheels = { front: frontWheels, all: allWheels };
+  vehicle._modelInfo = info;
+  vehicle.color = info.body;
+  vehicle.topSpeed = vehicle.topSpeed ?? info.topSpeed;
+  vehicle.speed = vehicle.speed ?? 0;
+  vehicle.steer = vehicle.steer ?? 0;
+  vehicle.pos.y = vehicle.pos.y ?? 0;
+  return vehicle;
+}
+
+export function materializeVehicle(vehicle, scene = vehicleScene) {
+  if (!vehicle || vehicle.group) return vehicle;
+  const targetScene = scene ?? vehicleScene;
+  if (!targetScene) return vehicle;
+
+  vehicle.pos ??= { x: 0, y: 0, z: 0 };
+  vehicle.heading ??= 0;
+  vehicle.speed ??= 0;
+  return createVehicleVisual(vehicle, targetScene);
+}
+
+function clampPointToCity(world, x, z) {
+  let result = null;
+  if (typeof world.clampToCity === 'function') {
+    result = world.clampToCity(x, z);
+  }
+  if (Array.isArray(result)) {
+    x = Number.isFinite(result[0]) ? result[0] : x;
+    z = Number.isFinite(result[1]) ? result[1] : z;
+  } else if (result && typeof result === 'object') {
+    x = Number.isFinite(result.x) ? result.x : x;
+    z = Number.isFinite(result.z) ? result.z : z;
+  }
+  return { x, z: Math.min(z, 680) };
+}
+
+function collidesWithBuilding(world, x, z, radius) {
+  for (const building of world.buildings ?? []) {
+    if (
+      x > building.x - building.w / 2 - radius &&
+      x < building.x + building.w / 2 + radius &&
+      z > building.z - building.d / 2 - radius &&
+      z < building.z + building.d / 2 + radius
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pushOutOfBuildings(world, x, z, radius) {
+  for (const building of world.buildings ?? []) {
+    const minX = building.x - building.w / 2 - radius;
+    const maxX = building.x + building.w / 2 + radius;
+    const minZ = building.z - building.d / 2 - radius;
+    const maxZ = building.z + building.d / 2 + radius;
+
+    if (x <= minX || x >= maxX || z <= minZ || z >= maxZ) continue;
+
+    const distances = [
+      [x - minX, minX, z, 'x'],
+      [maxX - x, maxX, z, 'x'],
+      [z - minZ, x, minZ, 'z'],
+      [maxZ - z, x, maxZ, 'z']
+    ].sort((a, b) => a[0] - b[0]);
+
+    const nearest = distances[0];
+    if (nearest[3] === 'x') x = nearest[1];
+    else z = nearest[2];
+  }
+  return { x, z };
+}
+
+function spawnPointPosition(point) {
+  if (Array.isArray(point)) {
+    return {
+      x: Number.isFinite(point[0]) ? point[0] : 0,
+      z: Number.isFinite(point[2]) ? point[2] : Number.isFinite(point[1]) ? point[1] : 0
+    };
+  }
+  return {
+    x: Number.isFinite(point?.x) ? point.x : 0,
+    z: Number.isFinite(point?.z) ? point.z : 0
+  };
+}
+
+function buildCurbCandidates(world, random) {
+  const pitch = Number.isFinite(world.pitch) ? world.pitch : 112;
+  const buildings = world.buildings ?? [];
+  let extent = pitch * 4;
+
+  for (const building of buildings) {
+    extent = Math.max(
+      extent,
+      Math.abs(building.x) + building.w / 2 + pitch,
+      Math.abs(building.z) + building.d / 2 + pitch
+    );
+  }
+
+  const limit = Math.min(14, Math.ceil(extent / pitch));
+  const candidates = [];
+
+  for (let roadIndex = -limit; roadIndex <= limit; roadIndex++) {
+    const roadX = roadIndex * pitch;
+    const roadZ = roadIndex * pitch;
+
+    for (let segment = -limit; segment <= limit; segment++) {
+      const along = segment * pitch + pitch * 0.5;
+      for (const side of [-1, 1]) {
+        candidates.push({
+          x: roadX + side * 7.5,
+          z: along,
+          heading: side < 0 ? 0 : Math.PI
+        });
+        candidates.push({
+          x: along,
+          z: roadZ + side * 7.5,
+          heading: side < 0 ? Math.PI / 2 : -Math.PI / 2
+        });
+      }
+    }
+  }
+
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  return candidates;
 }
 
 export function createVehicleManager(scene, world, camera) {
+  vehicleScene = scene;
   const state = world.state;
-  state.player = state.player || {
-    pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 },
-    heading: 0, onFoot: true, health: 100, cash: 250,
+  state.currentVehicle ??= null;
+  state.player ??= {
+    pos: { x: 0, y: 0, z: 0 },
+    vel: { x: 0, y: 0, z: 0 },
+    heading: 0,
+    onFoot: true,
+    health: 100,
+    cash: 250
   };
-  state.player.pos = state.player.pos || { x: 0, y: 0, z: 0 };
-  state.player.vel = state.player.vel || { x: 0, y: 0, z: 0 };
-  if (!('currentVehicle' in state)) state.currentVehicle = null;
+  state.player.pos ??= { x: 0, y: 0, z: 0 };
+  state.player.vel ??= { x: 0, y: 0, z: 0 };
+  state.player.onFoot ??= true;
 
   const cars = [];
   let nextId = 1;
-  let wasEPressed = false;
-  let camInit = false;
-  let cameraYaw = Number(state.player.heading) || 0;
+  let previousE = false;
+  let cameraYaw = 0;
   let cameraYawOffset = 0;
-  const desiredCam = new THREE.Vector3();
-  const camTarget = new THREE.Vector3();
+  let cameraInitialized = false;
 
-  function createCar(type, x, z, heading = 0) {
-    const safeType = type in VEHICLE_TYPES ? type : 'sedan';
-    const config = VEHICLE_TYPES[safeType];
-    const model = buildCarModel(safeType, config);
+  function createCar(type, x, z, heading = 0, owned = true) {
+    const key = resolveModelKey(type);
     const vehicle = {
       id: `vehicle-${nextId++}`,
-      type: safeType,
-      group: model.group,
-      pos: { x: Number(x) || 0, y: 0, z: Number(z) || 0 },
-      heading: Number(heading) || 0,
+      type: key,
+      pos: { x, y: 0, z },
+      heading,
       speed: 0,
-      topSpeed: config.topSpeed,
-      color: config.color,
-      wheels: model.wheels,
-      steer: 0,
-      owned: true, // createCar vehicles are staged/owned; parked spawns set owned=false
-      _config: config,
+      topSpeed: MODEL_INFO[key].topSpeed,
+      color: MODEL_INFO[key].body,
+      owned: Boolean(owned),
+      steer: 0
     };
-    model.group.position.set(vehicle.pos.x, 0, vehicle.pos.z);
-    model.group.rotation.y = -vehicle.heading;
-    scene.add(model.group);
+    materializeVehicle(vehicle, scene);
     cars.push(vehicle);
     return vehicle;
   }
 
-  // Deterministic parked cars: world.spawnPoints.cars first, then lane spots.
   function spawnCars(count = 10, seedOffset = 0) {
-    const placed = [];
-    const types = ['sedan', 'taxi', 'sports', 'truck'];
-    const seedBase = Number.isFinite(world.seed) ? world.seed : 0x51a7;
-    const rng = mulberry32((seedBase ^ Math.imul((Number(seedOffset) || 0) + 1, 0x9e3779b1)) >>> 0);
-    const spots = [...(world.spawnPoints?.cars ?? [])];
-    const lines = Array.isArray(world.roadLines) ? world.roadLines : [];
-    let guard = 0;
-    while (placed.length < count && guard++ < 200) {
-      let spot;
-      if (spots.length) {
-        spot = spots.shift();
-      } else if (lines.length) {
-        const line = lines[Math.floor(rng() * lines.length)];
-        const axis = rng() < 0.5 ? 'x' : 'z';
-        const lane = rng() < 0.5 ? -7.5 : 7.5; // near the curb
-        const along = rng() * 1000 - 500;
-        spot = {
-          x: axis === 'x' ? along : line + lane,
-          z: axis === 'x' ? line + lane : along,
-          heading: headingForLane(axis, lane > 0 ? 4.5 : -4.5),
-          type: types[Math.floor(rng() * types.length)],
-        };
-      } else break;
-      if (hitsBuilding(world, spot.x, spot.z, CAR_RADIUS)) continue;
-      if (placed.some((p) => Math.hypot(p.x - spot.x, p.z - spot.z) < 7)) continue;
-      const vehicle = createCar(spot.type || types[Math.floor(rng() * types.length)], spot.x, spot.z, spot.heading);
-      vehicle.owned = false; // parked cars are stealable
-      placed.push(vehicle);
+    const total = Math.max(0, Math.floor(count));
+    if (total === 0) return [];
+
+    const seed = (
+      (Number.isFinite(seedOffset) ? seedOffset : 0) +
+      (Number.isFinite(world.seed) ? world.seed : 0) +
+      0x51f15e
+    ) >>> 0;
+    const random = mulberry32(seed);
+    const spawned = [];
+    const types = ['sedan', 'taxi', 'sports', 'truck', 'police'];
+    const points = world.spawnPoints?.cars;
+    const parkedPoints = Array.isArray(points) ? points : [];
+
+    // Use authored parked-car locations before generating curbside locations.
+    for (const point of parkedPoints) {
+      if (spawned.length >= total) break;
+      const position = spawnPointPosition(point);
+      const heading = Number.isFinite(point?.heading) ? point.heading : 0;
+      const type = MODEL_KEYS.has(point?.type) ? point.type : types[Math.floor(random() * types.length)];
+      const car = createCar(type, position.x, position.z, heading, false);
+      spawned.push(car);
     }
-    return placed;
-  }
 
-  function setCameraYaw(yaw) {
-    if (Number.isFinite(yaw)) cameraYaw = yaw;
-  }
+    if (spawned.length < total) {
+      const candidates = buildCurbCandidates(world, random);
+      for (const candidate of candidates) {
+        if (spawned.length >= total) break;
 
-  // Attach a visual mesh to a vehicle object that has none (e.g. a plain
-  // staging stub { id, type, pos, heading, speed } from shots.js).
-  function materializeVehicle(vehicle) {
-    if (!vehicle || vehicle.group) return vehicle;
-    const safeType = resolveType(vehicle.type);
-    const config = VEHICLE_TYPES[safeType];
-    const model = buildCarModel(safeType, config);
-    if (!vehicle.pos) vehicle.pos = { x: 0, y: 0, z: 0 };
-    if (!Number.isFinite(vehicle.heading)) vehicle.heading = 0;
-    if (!Number.isFinite(vehicle.speed)) vehicle.speed = 0;
-    vehicle.modelType = safeType;
-    vehicle.group = model.group;
-    vehicle.wheels = model.wheels;
-    vehicle.topSpeed = config.topSpeed;
-    vehicle.color = config.color;
-    vehicle.steer = 0;
-    vehicle._config = config;
-    model.group.position.set(vehicle.pos.x, 0, vehicle.pos.z);
-    model.group.rotation.y = -vehicle.heading;
-    scene.add(model.group);
-    if (!cars.includes(vehicle)) cars.push(vehicle);
-    return vehicle;
+        const clamped = clampPointToCity(world, candidate.x, candidate.z);
+        if (
+          Math.abs(clamped.x - candidate.x) > 0.01 ||
+          Math.abs(clamped.z - candidate.z) > 0.01 ||
+          collidesWithBuilding(world, candidate.x, candidate.z, 1.3)
+        ) {
+          continue;
+        }
+
+        let occupied = false;
+        for (const car of cars) {
+          if (Math.hypot(car.pos.x - candidate.x, car.pos.z - candidate.z) < 6.8) {
+            occupied = true;
+            break;
+          }
+        }
+        if (occupied) continue;
+
+        const type = types[Math.floor(random() * types.length)];
+        const car = createCar(type, candidate.x, candidate.z, candidate.heading, false);
+        spawned.push(car);
+      }
+    }
+
+    return spawned;
   }
 
   function enterVehicle(vehicle) {
-    if (!vehicle || state.player.onFoot === false || state.currentVehicle) return false;
-    materializeVehicle(vehicle);
+    if (!vehicle || !state.player.onFoot || state.currentVehicle !== null) return false;
+    if (!cars.includes(vehicle)) return false;
+
+    materializeVehicle(vehicle, scene);
     state.currentVehicle = vehicle;
     state.player.onFoot = false;
     state.player.vel.x = 0;
     state.player.vel.y = 0;
     state.player.vel.z = 0;
-    vehicle.speed = 0;
-    cameraYawOffset = cameraYaw - vehicle.heading;
-    // Stealing a parked (non-owned) car is a crime; police.js sets this hook.
-    if (vehicle.owned === false && typeof state._onVehicleTheft === 'function') {
-      state._onVehicleTheft(vehicle);
+    vehicle._playerHidden = true;
+
+    if (vehicle.owned === false) {
+      world.state._onVehicleTheft?.(vehicle);
     }
+
+    cameraYawOffset = normalizeAngle(cameraYaw - vehicle.heading);
     return true;
   }
 
   function exitVehicle() {
     const vehicle = state.currentVehicle;
     if (!vehicle) return false;
+
     const rightX = Math.cos(vehicle.heading);
     const rightZ = Math.sin(vehicle.heading);
-    let exit = clampWorld(world, vehicle.pos.x + rightX * 2.2, vehicle.pos.z + rightZ * 2.2);
-    if (hitsBuilding(world, exit.x, exit.z, 0.6)) {
-      exit = clampWorld(world, vehicle.pos.x - rightX * 2.2, vehicle.pos.z - rightZ * 2.2);
-    }
-    state.player.pos.x = exit.x;
+    const exitX = vehicle.pos.x + rightX * 2.2;
+    const exitZ = vehicle.pos.z + rightZ * 2.2;
+    const point = clampPointToCity(world, exitX, exitZ);
+    const resolved = pushOutOfBuildings(world, point.x, point.z, 0.6);
+
+    state.player.pos.x = resolved.x;
     state.player.pos.y = 0;
-    state.player.pos.z = exit.z;
+    state.player.pos.z = resolved.z;
     state.player.heading = vehicle.heading;
     state.player.vel.x = 0;
     state.player.vel.y = 0;
@@ -313,139 +654,198 @@ export function createVehicleManager(scene, world, camera) {
     state.player.onFoot = true;
     state.currentVehicle = null;
     vehicle.speed = 0;
-    cameraYaw = vehicle.heading + cameraYawOffset;
-    camInit = false;
+    vehicle._playerHidden = false;
     return true;
   }
 
   function getNearbyVehicle(maxDist = 3.5) {
-    if (state.player.onFoot === false || state.currentVehicle) return null;
+    if (!state.player.onFoot) return null;
+
     let nearest = null;
-    let nearestDistance = Number.isFinite(maxDist) ? maxDist : 3.5;
+    let nearestDistance = maxDist;
     for (const vehicle of cars) {
-      const d = Math.hypot(vehicle.pos.x - state.player.pos.x, vehicle.pos.z - state.player.pos.z);
-      if (d <= nearestDistance) {
-        nearestDistance = d;
+      const distance = Math.hypot(
+        vehicle.pos.x - state.player.pos.x,
+        vehicle.pos.z - state.player.pos.z
+      );
+      if (distance <= nearestDistance) {
         nearest = vehicle;
+        nearestDistance = distance;
       }
     }
     return nearest;
   }
 
-  function moveCar(vehicle, oldX, oldZ, newX, newZ) {
-    const c = clampWorld(world, newX, newZ);
-    newX = c.x;
-    newZ = c.z;
-    if (!hitsBuilding(world, newX, newZ, CAR_RADIUS)) {
-      vehicle.pos.x = newX;
-      vehicle.pos.z = newZ;
+  function syncVehicle(vehicle, dt) {
+    const group = vehicle.group;
+    if (!group) return;
+
+    group.position.set(vehicle.pos.x, vehicle.pos.y ?? 0, vehicle.pos.z);
+    group.rotation.y = -vehicle.heading;
+
+    const spin = vehicle.speed * dt / 0.34;
+    for (const wheel of vehicle.wheels?.all ?? []) {
+      wheel.mesh.rotation.x += spin;
+      wheel.hub.rotation.x += spin;
+    }
+    const steeringAngle = -(vehicle.steer ?? 0) * 0.48;
+    for (const wheel of vehicle.wheels?.front ?? []) {
+      wheel.pivot.rotation.y = steeringAngle;
+    }
+  }
+
+  function updateCamera(vehicle, dt, input) {
+    if (!camera || !vehicle) return;
+
+    const mouseDX = Number.isFinite(state.input?.mouseDX)
+      ? state.input.mouseDX
+      : Number.isFinite(input.mouseDX)
+        ? input.mouseDX
+        : 0;
+    cameraYawOffset = normalizeAngle(cameraYawOffset + mouseDX * 0.0028);
+    cameraYawOffset = THREE.MathUtils.damp(cameraYawOffset, 0, 1.1, Math.max(0, dt));
+
+    const viewYaw = vehicle.heading + cameraYawOffset;
+    const forwardX = Math.sin(viewYaw);
+    const forwardZ = -Math.cos(viewYaw);
+    const desired = new THREE.Vector3(
+      vehicle.pos.x - forwardX * 10,
+      (vehicle.pos.y ?? 0) + 3.5,
+      vehicle.pos.z - forwardZ * 10
+    );
+    const lookAt = new THREE.Vector3(
+      vehicle.pos.x + Math.sin(vehicle.heading) * 6,
+      (vehicle.pos.y ?? 0) + 1.2,
+      vehicle.pos.z - Math.cos(vehicle.heading) * 6
+    );
+
+    if (!cameraInitialized) {
+      camera.position.copy(desired);
+      cameraInitialized = true;
+    } else {
+      camera.position.lerp(desired, 1 - Math.exp(-6 * Math.max(0, dt)));
+    }
+    camera.lookAt(lookAt);
+  }
+
+  function update(dt, input = {}) {
+    const keys = input.keys ?? state.input?.keys ?? new Set();
+    const isEPressed = keys.has('KeyE');
+    const eJustPressed = isEPressed && !previousE;
+    previousE = isEPressed;
+
+    const safeDt = Math.min(Math.max(dt, 0), 0.05);
+    const vehicle = state.currentVehicle;
+
+    if (!vehicle) {
+      cameraInitialized = false;
       return;
     }
-    // Slide: try x-only, then z-only, else stop.
-    if (!hitsBuilding(world, newX, oldZ, CAR_RADIUS)) {
-      vehicle.pos.x = newX;
-      vehicle.pos.z = oldZ;
-    } else if (!hitsBuilding(world, oldX, newZ, CAR_RADIUS)) {
-      vehicle.pos.x = oldX;
-      vehicle.pos.z = newZ;
-    } else {
-      vehicle.pos.x = oldX;
-      vehicle.pos.z = oldZ;
+
+    materializeVehicle(vehicle, scene);
+    if (eJustPressed) {
+      exitVehicle();
+      return;
     }
-    vehicle.speed *= 0.4;
-  }
 
-  function syncCar(vehicle, dt) {
-    vehicle.group.position.set(vehicle.pos.x, 0, vehicle.pos.z);
-    vehicle.group.rotation.y = -vehicle.heading;
-    const spin = (vehicle.speed * Math.max(0, dt)) / 0.36;
-    for (const wheel of vehicle.wheels.all) wheel.rollGroup.rotation.x += spin;
-    for (const wheel of vehicle.wheels.front) wheel.wheelGroup.rotation.y = -vehicle.steer;
-  }
+    const active = state.screen === 'play' && !state.paused;
+    if (active) {
+      const modelKey = resolveModelKey(vehicle.type);
+      const accelerationRate = modelKey === 'truck' ? 8 : 12;
+      const brakingRate = 18;
+      const reverseRate = 6;
+      const throttle = keys.has('KeyW');
+      const braking = keys.has('KeyS');
+      const handbrake = keys.has('Space');
 
-  function updateDriving(dt, input) {
-    const vehicle = state.currentVehicle;
-    if (!vehicle) return;
-    const config = vehicle._config || VEHICLE_TYPES[vehicle.type] || VEHICLE_TYPES.sedan;
-    const keys = input?.keys ?? new Set();
-    const safeDt = Math.min(Math.max(0, Number(dt) || 0), 0.05);
-    const accel = keys.has('KeyW');
-    const reverse = keys.has('KeyS');
-    const handbrake = keys.has('Space');
-    const steerInput = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
-
-    if (accel) {
-      vehicle.speed += config.accel * safeDt;
-    } else if (reverse) {
-      if (vehicle.speed > 0.4) vehicle.speed = Math.max(0, vehicle.speed - 18 * safeDt);
-      else vehicle.speed = Math.max(-6, vehicle.speed - 6 * safeDt);
-    } else {
-      const friction = handbrake ? 38 : 5.5;
-      const dec = friction * safeDt;
-      if (Math.abs(vehicle.speed) <= dec) vehicle.speed = 0;
-      else vehicle.speed -= Math.sign(vehicle.speed) * dec;
-    }
-    vehicle.speed = THREE.MathUtils.clamp(vehicle.speed, -6, config.topSpeed);
-
-    const steerBlend = 1 - Math.exp(-10 * safeDt);
-    vehicle.steer = THREE.MathUtils.lerp(vehicle.steer, steerInput * (handbrake ? 0.72 : 0.5), steerBlend);
-    const speedFactor = THREE.MathUtils.clamp(Math.abs(vehicle.speed) / 8, 0, 1);
-    const highSpeedCut = THREE.MathUtils.clamp(1 - Math.max(0, Math.abs(vehicle.speed) - 22) / 40, 0.45, 1);
-    const dir = vehicle.speed < -0.1 ? -1 : 1;
-    vehicle.heading += steerInput * (handbrake ? 1.9 : 1.6) * (handbrake ? 1.35 : 1) *
-      speedFactor * highSpeedCut * dir * safeDt;
-
-    const fwd = forwardForHeading(vehicle.heading);
-    const oldX = vehicle.pos.x;
-    const oldZ = vehicle.pos.z;
-    moveCar(vehicle, oldX, oldZ, oldX + fwd.x * vehicle.speed * safeDt, oldZ + fwd.z * vehicle.speed * safeDt);
-    vehicle.pos.y = 0;
-    syncCar(vehicle, safeDt);
-
-    // Chase camera: behind the car, mouse orbit decays back to straight behind.
-    cameraYawOffset += (Number(input?.mouseDX) || 0) * 0.0028;
-    cameraYawOffset = THREE.MathUtils.lerp(cameraYawOffset, 0, 1 - Math.exp(-0.8 * safeDt));
-    const viewYaw = vehicle.heading + cameraYawOffset;
-    const camFwd = forwardForHeading(viewYaw);
-    camTarget.set(vehicle.pos.x + fwd.x * 6, 1.2, vehicle.pos.z + fwd.z * 6);
-    desiredCam.set(vehicle.pos.x - camFwd.x * 10, 3.5, vehicle.pos.z - camFwd.z * 10);
-    if (camera) {
-      if (!camInit) {
-        camera.position.copy(desiredCam);
-        camInit = true;
+      if (throttle) {
+        vehicle.speed += accelerationRate * safeDt;
+      } else if (braking) {
+        if (vehicle.speed > 0.25) {
+          vehicle.speed = Math.max(0, vehicle.speed - brakingRate * safeDt);
+        } else {
+          vehicle.speed = Math.max(-6, vehicle.speed - reverseRate * safeDt);
+        }
       } else {
-        camera.position.lerp(desiredCam, 1 - Math.exp(-6 * safeDt));
+        const drag = handbrake ? 26 : 2.2;
+        vehicle.speed = THREE.MathUtils.damp(vehicle.speed, 0, drag, safeDt);
       }
-      camera.lookAt(camTarget);
-    }
-    state.currentVehicle.speed = vehicle.speed;
-  }
 
-  function update(dt, input) {
-    const keys = input?.keys ?? new Set();
-    const ePressed = keys.has('KeyE');
-    const eJust = ePressed && !wasEPressed;
-    wasEPressed = ePressed;
-    if (state.screen !== 'play' || state.paused) return;
-    if (eJust) {
-      if (state.currentVehicle) exitVehicle();
-      else {
-        const nearby = getNearbyVehicle();
-        if (nearby) enterVehicle(nearby);
+      const topSpeed = vehicle.topSpeed ?? MODEL_INFO[modelKey].topSpeed;
+      vehicle.speed = THREE.MathUtils.clamp(vehicle.speed, -6, topSpeed);
+
+      const steerInput =
+        (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+      const steerRate = 1 - Math.exp(-(handbrake ? 12 : 8) * safeDt);
+      vehicle.steer = THREE.MathUtils.lerp(vehicle.steer ?? 0, steerInput, steerRate);
+
+      const speedRatio = Math.min(Math.abs(vehicle.speed) / 8, 1);
+      const highSpeedReduction = 1 / (1 + Math.max(0, Math.abs(vehicle.speed) - 20) * 0.035);
+      const handbrakeBoost = handbrake ? 1.25 : 1;
+      const turnRate = 1.6 * speedRatio * highSpeedReduction * handbrakeBoost;
+      const reverseSign = vehicle.speed < -0.1 ? -1 : 1;
+      vehicle.heading += vehicle.steer * turnRate * reverseSign * safeDt;
+
+      const forwardX = Math.sin(vehicle.heading);
+      const forwardZ = -Math.cos(vehicle.heading);
+      const oldX = vehicle.pos.x;
+      const oldZ = vehicle.pos.z;
+      let nextX = oldX + forwardX * vehicle.speed * safeDt;
+      let nextZ = oldZ + forwardZ * vehicle.speed * safeDt;
+
+      const clamped = clampPointToCity(world, nextX, nextZ);
+      nextX = clamped.x;
+      nextZ = clamped.z;
+
+      const radius = 1.3;
+      if (collidesWithBuilding(world, nextX, nextZ, radius)) {
+        const xOnly = clampPointToCity(world, nextX, oldZ);
+        const zOnly = clampPointToCity(world, oldX, nextZ);
+        const canMoveX =
+          !collidesWithBuilding(world, xOnly.x, xOnly.z, radius);
+        const canMoveZ =
+          !collidesWithBuilding(world, zOnly.x, zOnly.z, radius);
+
+        if (canMoveX) {
+          nextX = xOnly.x;
+          nextZ = xOnly.z;
+        } else if (canMoveZ) {
+          nextX = zOnly.x;
+          nextZ = zOnly.z;
+        } else {
+          nextX = oldX;
+          nextZ = oldZ;
+        }
+        vehicle.speed *= 0.4;
       }
+
+      vehicle.pos.x = nextX;
+      vehicle.pos.y = 0;
+      vehicle.pos.z = nextZ;
     }
-    if (state.currentVehicle) updateDriving(dt, input);
+
+    state.player.pos.x = vehicle.pos.x;
+    state.player.pos.y = vehicle.pos.y ?? 0;
+    state.player.pos.z = vehicle.pos.z;
+    state.player.heading = vehicle.heading;
+    vehicle.speed = Number.isFinite(vehicle.speed) ? vehicle.speed : 0;
+
+    syncVehicle(vehicle, safeDt);
+    updateCamera(vehicle, safeDt, input);
   }
 
   return {
     cars,
     spawnCars,
-    createCar,
-    materializeVehicle,
+    createCar(type, x, z, heading = 0) {
+      return createCar(type, x, z, heading, true);
+    },
     enterVehicle,
     exitVehicle,
     getNearbyVehicle,
     update,
-    setCameraYaw,
+    setCameraYaw(yaw) {
+      if (Number.isFinite(yaw)) cameraYaw = yaw;
+    }
   };
 }

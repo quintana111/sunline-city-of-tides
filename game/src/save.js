@@ -1,60 +1,69 @@
-// Save / load (design §11). Written fresh 2026-11-24 (Builder B).
-// Versioned, plain data only — never serializes Three.js objects.
-// Key matches main.js's inline fallback ('sunline-save-v1') so the
-// pause-screen Save/Load buttons keep working either way.
-const SAVE_KEY = 'sunline-save-v1';
-const SAVE_VERSION = 1;
+// Save / load for Sunline: City of Tides — versioned localStorage save,
+// plain data only (never Three.js objects). loadGame(state, world) applies
+// onto the passed state when one is given.
+export const SAVE_KEY = 'sunline-save-v1';
 
-function plainState(state) {
-  return {
-    version: SAVE_VERSION,
-    savedAt: Date.now(),
-    player: {
-      pos: {
-        x: Number(state.player?.pos?.x) || 0,
-        y: Number(state.player?.pos?.y) || 0,
-        z: Number(state.player?.pos?.z) || 0,
-      },
-      vel: {
-        x: Number(state.player?.vel?.x) || 0,
-        y: Number(state.player?.vel?.y) || 0,
-        z: Number(state.player?.vel?.z) || 0,
-      },
-      heading: Number(state.player?.heading) || 0,
-      onFoot: state.player?.onFoot !== false,
-      health: Math.max(0, Math.min(100, Number(state.player?.health) || 100)),
-      cash: Math.max(0, Number(state.player?.cash) || 0),
-    },
-    wanted: Math.max(0, Math.min(5, Math.floor(Number(state.wanted) || 0))),
-    mission: {
-      id: state.mission?.id ?? null,
-      title: state.mission?.title ?? '',
-      objective: state.mission?.objective ?? '',
-      stage: Number(state.mission?.stage) || 0,
-    },
-    timeOfDay: Number(state.timeOfDay) || 17.25,
-    seed: Number(state.seed) || 24681357,
+const MISSION_INFO = {
+  'first-light': { title: 'First Light Run', objective: 'Pick up the parcel — Parcel Pickup' },
+  'harbour-receipt': { title: 'Harbour Receipt', objective: 'Collect the crate — Marina Crate' },
+  'wrong-turn': { title: 'Wrong Turn, Right Friend', objective: 'Pick up the stranded mechanic — Civic Crescent' },
+  'last-ferry': { title: 'Last Ferry Window', objective: 'Bring the contact to the Ferry Dock before the last boarding' },
+};
+
+function storage() {
+  if (typeof globalThis !== 'undefined' && globalThis.localStorage) return globalThis.localStorage;
+  if (typeof window !== 'undefined' && window.localStorage) return window.localStorage;
+  return null;
+}
+
+function finiteOr(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function applyData(target, data) {
+  if (!target || typeof target !== 'object') return;
+  target.seed = data.seed;
+  target.timeOfDay = data.timeOfDay;
+  target.wanted = data.wanted;
+  target.player = target.player && typeof target.player === 'object' ? target.player : {};
+  target.player.pos = { ...data.player.pos };
+  target.player.heading = data.player.heading;
+  target.player.onFoot = data.player.onFoot;
+  target.player.health = data.health;
+  target.player.cash = data.cash;
+  const info = data.mission.id ? MISSION_INFO[data.mission.id] : null;
+  target.mission = {
+    id: data.mission.id,
+    stage: data.mission.stage,
+    title: info ? info.title : '',
+    objective: info ? info.objective : '',
   };
 }
 
-function validate(data) {
-  if (!data || typeof data !== 'object') return null;
-  if (data.version !== SAVE_VERSION) return null;
-  if (!data.player || typeof data.player !== 'object') return null;
-  const pos = data.player.pos;
-  if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return null;
-  if (Math.abs(pos.x) > 2000 || Math.abs(pos.z) > 2000) return null;
-  if (!Number.isFinite(data.player.health) || data.player.health < 0 || data.player.health > 100) return null;
-  if (!Number.isFinite(data.player.cash) || data.player.cash < 0) return null;
-  if (!Number.isFinite(data.wanted) || data.wanted < 0 || data.wanted > 5) return null;
-  if (!Number.isFinite(data.timeOfDay) || data.timeOfDay < 0 || data.timeOfDay >= 24) return null;
-  return data;
-}
-
-export function saveGame(state) {
-  if (!state) return false;
+export function saveGame(state, world) {
+  if (!state || typeof state !== 'object') return false;
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(plainState(state)));
+    const store = storage();
+    if (!store) return false;
+    const player = state.player || {};
+    const pos = player.pos || {};
+    const mission = state.mission || {};
+    const data = {
+      version: 1,
+      savedAt: Date.now() / 1000,
+      seed: finiteOr(state.seed, 0),
+      timeOfDay: finiteOr(state.timeOfDay, 17.25),
+      wanted: finiteOr(state.wanted, 0),
+      cash: finiteOr(player.cash, 250),
+      health: finiteOr(player.health, 100),
+      player: {
+        pos: { x: finiteOr(pos.x, 0), y: finiteOr(pos.y, 0), z: finiteOr(pos.z, 0) },
+        heading: finiteOr(player.heading, 0),
+        onFoot: typeof player.onFoot === 'boolean' ? player.onFoot : true,
+      },
+      mission: { id: mission.id ?? null, stage: finiteOr(mission.stage, 0) },
+    };
+    store.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
   } catch {
     return false;
@@ -62,44 +71,75 @@ export function saveGame(state) {
 }
 
 export function loadGame(state, world) {
-  let raw = null;
   try {
-    raw = localStorage.getItem(SAVE_KEY);
-  } catch {
-    return null;
-  }
-  if (!raw) return null;
-  let parsed = null;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  const data = validate(parsed);
-  if (!data) return null;
-  // When main.js passes the live state, apply the save into it.
-  if (state && typeof state === 'object') {
-    Object.assign(state.player, data.player);
-    state.player.pos = { ...data.player.pos };
-    state.player.vel = { ...data.player.vel };
-    state.wanted = data.wanted;
-    state.mission = { ...data.mission };
-    state.timeOfDay = data.timeOfDay;
-    if (world?.state) {
-      // Keep the world's state reference in sync (same object in practice).
-      void world;
+    const store = storage();
+    if (!store) return null;
+    const raw = store.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || parsed.version !== 1) return null;
+
+    const savedPlayer = parsed.player && typeof parsed.player === 'object' ? parsed.player : {};
+    const savedPos = savedPlayer.pos && typeof savedPlayer.pos === 'object' ? savedPlayer.pos : {};
+    const savedMission = parsed.mission && typeof parsed.mission === 'object' ? parsed.mission : {};
+    const missionId = savedMission.id === undefined ? null : savedMission.id;
+    if (missionId !== null && (typeof missionId !== 'string' || !Object.hasOwn(MISSION_INFO, missionId))) {
+      return null;
     }
+
+    const health = finiteOr(parsed.health, 100);
+    const cash = finiteOr(parsed.cash, 250);
+    const wanted = finiteOr(parsed.wanted, 0);
+    const timeOfDay = finiteOr(parsed.timeOfDay, 17.25);
+    const x = finiteOr(savedPos.x, 0);
+    const y = finiteOr(savedPos.y, 0);
+    const z = finiteOr(savedPos.z, 0);
+    const heading = finiteOr(savedPlayer.heading, 0);
+    const stage = finiteOr(savedMission.stage, 0);
+    if (health < 0 || health > 100 || cash < 0 || wanted < 0 || wanted > 5 ||
+        timeOfDay < 0 || timeOfDay > 24) return null;
+
+    const data = {
+      version: 1,
+      savedAt: finiteOr(parsed.savedAt, 0),
+      seed: finiteOr(parsed.seed, 0),
+      timeOfDay,
+      wanted,
+      cash,
+      health,
+      player: {
+        pos: { x, y, z },
+        heading,
+        onFoot: typeof savedPlayer.onFoot === 'boolean' ? savedPlayer.onFoot : true,
+      },
+      mission: { id: missionId, stage },
+    };
+
+    if (state && typeof state === 'object') applyData(state, data);
+    try {
+      if (world && world.state && world.state !== state) applyData(world.state, data);
+    } catch {
+      // The optional world state may be read-only.
+    }
+    try {
+      const gamePlayer = typeof window !== 'undefined' ? window.__game?.player : null;
+      gamePlayer?.setPosition?.(x, z);
+    } catch {
+      // The global game instance is optional.
+    }
+    return data;
+  } catch {
+    return null;
   }
-  return data;
 }
 
 export function clearSave() {
   try {
-    localStorage.removeItem(SAVE_KEY);
+    const store = storage();
+    if (!store) return false;
+    store.removeItem(SAVE_KEY);
     return true;
   } catch {
     return false;
   }
 }
-
-export { SAVE_KEY, SAVE_VERSION };

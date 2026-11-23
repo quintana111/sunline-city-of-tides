@@ -1,310 +1,322 @@
-// Ambient traffic + pedestrians. Cars follow seeded lane loops; peds walk
-// sidewalk loops and flee from fast nearby vehicles. Written fresh 2026-11-24
-// (Builder A re-author). No Math.random() here: placement uses world.rng,
-// updates are deterministic.
 import * as THREE from 'three';
 
 export function createTraffic(scene, world) {
-  const rng = world.rng;
-  const random = () => {
-    if (rng && typeof rng.next === 'function') return rng.next();
-    return 0.5;
-  };
-  const choose = (values) => values[Math.floor(random() * values.length)];
   const cars = [];
   const pedestrians = [];
+  const materials = {
+    body: [
+      0xc4543e, 0x3f7480, 0xd0a34c, 0x596b4b, 0xddd0b2,
+      0x343f50, 0x8b5970, 0x738c91, 0x24292c
+    ].map(color => new THREE.MeshStandardMaterial({ color, roughness: 0.68, metalness: 0.08 })),
+    cabin: new THREE.MeshStandardMaterial({ color: 0x28333a, roughness: 0.38, metalness: 0.12 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0x91adb0, roughness: 0.25, metalness: 0.08 }),
+    tire: new THREE.MeshStandardMaterial({ color: 0x202122, roughness: 0.95 }),
+    hub: new THREE.MeshStandardMaterial({ color: 0x9b9a8c, roughness: 0.5, metalness: 0.35 }),
+    taxi: new THREE.MeshStandardMaterial({ color: 0xf2ca45, roughness: 0.62 }),
+    sign: new THREE.MeshStandardMaterial({ color: 0xffe78a, emissive: 0x473510, roughness: 0.55 }),
+    shirts: [
+      0xc65d47, 0x668079, 0xd3a44b, 0x6d718c, 0x789451,
+      0x975d78, 0xb4c0b9, 0x516d91, 0xe0c5a1
+    ].map(color => new THREE.MeshStandardMaterial({ color, roughness: 0.82 })),
+    skin: new THREE.MeshStandardMaterial({ color: 0xb87e5e, roughness: 0.9 }),
+    pants: new THREE.MeshStandardMaterial({ color: 0x343944, roughness: 0.9 })
+  };
 
-  const paintColors = [0x36a4a3, 0xd95645, 0xe4b93e, 0x4779b5, 0xe7e0cb];
-  const shirtColors = [0xe16e52, 0x42a39c, 0xe2b544, 0x567cb4, 0xb86da2, 0xe4e0d0];
-  const carBodyGeo = new THREE.BoxGeometry(2.2, 0.82, 4.25);
-  const carCabinGeo = new THREE.BoxGeometry(1.72, 0.78, 2.05);
-  const wheelGeo = new THREE.CylinderGeometry(0.39, 0.39, 0.25, 10);
-  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x202126, roughness: 0.95 });
-  const taxiSignGeo = new THREE.BoxGeometry(0.75, 0.22, 0.38);
-  const torsoGeo = new THREE.BoxGeometry(0.43, 0.68, 0.27);
-  const headGeo = new THREE.SphereGeometry(0.17, 9, 7);
-  const legGeo = new THREE.BoxGeometry(0.17, 0.58, 0.2);
-  const skinMat = new THREE.MeshStandardMaterial({ color: 0xc88f6e, roughness: 0.9 });
-  const legMat = new THREE.MeshStandardMaterial({ color: 0x353741, roughness: 0.92 });
-  const materials = new Map();
+  // Cars are built with their length along local -Z (forward), so
+  // rotation.y = -heading keeps them facing their travel direction.
+  const carBodyGeo = new THREE.BoxGeometry(1.9, 1.15, 4.2);
+  const carCabinGeo = new THREE.BoxGeometry(1.62, 0.92, 2.25);
+  const wheelGeo = new THREE.CylinderGeometry(0.43, 0.43, 0.28, 10);
+  const hubGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.29, 8);
+  const taxiSignGeo = new THREE.BoxGeometry(0.34, 0.2, 0.62);
+  const pedTorsoGeo = new THREE.BoxGeometry(0.42, 0.68, 0.27);
+  const pedHeadGeo = new THREE.SphereGeometry(0.17, 8, 6);
+  const pedLegGeo = new THREE.BoxGeometry(0.15, 0.53, 0.17);
 
-  function materialFor(color, options = {}) {
-    const key = `${color}:${options.roughness ?? 0.7}:${options.metalness ?? 0}`;
-    if (!materials.has(key)) {
-      materials.set(key, new THREE.MeshStandardMaterial({
-        color, roughness: options.roughness ?? 0.7, metalness: options.metalness ?? 0,
-      }));
+  let rngState = (Number(world.seed) || 24681357) >>> 0;
+  const random = () => {
+    if (typeof world.rng === 'function') {
+      const value = world.rng();
+      if (Number.isFinite(value)) return value;
     }
-    return materials.get(key);
-  }
+    rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
+    return rngState / 4294967296;
+  };
 
-  // Local -Z is the front, matching rotation.y = -heading.
-  function makeCar(color, taxi = false) {
+  function makeCar(type = 'sedan') {
     const group = new THREE.Group();
-    const body = new THREE.Mesh(carBodyGeo, materialFor(color, { roughness: 0.58, metalness: 0.12 }));
-    body.position.y = 0.72;
+    const paint = type === 'taxi'
+      ? materials.taxi
+      : materials.body[Math.floor(random() * materials.body.length)];
+    const body = new THREE.Mesh(carBodyGeo, paint);
+    body.position.y = 0.82;
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
-    const cabin = new THREE.Mesh(carCabinGeo, materialFor(taxi ? 0xe9e0c6 : color, { roughness: 0.5, metalness: 0.08 }));
-    cabin.position.set(0, 1.39, -0.12);
+
+    const cabin = new THREE.Mesh(carCabinGeo, materials.cabin);
+    cabin.position.set(0, 1.78, 0.15);
     cabin.castShadow = true;
     group.add(cabin);
-    for (const x of [-1.07, 1.07]) {
-      for (const z of [-1.38, 1.38]) {
-        const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+
+    const windshield = new THREE.Mesh(
+      new THREE.BoxGeometry(1.46, 0.67, 0.08),
+      materials.glass
+    );
+    windshield.position.set(0, 1.79, -0.99);
+    windshield.rotation.x = 0.2;
+    group.add(windshield);
+
+    for (const x of [-0.98, 0.98]) {
+      for (const z of [-1.35, 1.35]) {
+        const wheel = new THREE.Mesh(wheelGeo, materials.tire);
         wheel.rotation.z = Math.PI / 2;
-        wheel.position.set(x, 0.4, z);
+        wheel.position.set(x, 0.48, z);
         wheel.castShadow = true;
         group.add(wheel);
+
+        const hub = new THREE.Mesh(hubGeo, materials.hub);
+        hub.rotation.z = Math.PI / 2;
+        hub.position.set(x + (x > 0 ? 0.01 : -0.01), 0.48, z);
+        group.add(hub);
       }
     }
-    if (taxi) {
-      const sign = new THREE.Mesh(taxiSignGeo, materialFor(0xf4c63e, { roughness: 0.6 }));
-      sign.position.set(0, 1.9, -0.08);
-      sign.castShadow = true;
+
+    if (type === 'taxi') {
+      const sign = new THREE.Mesh(taxiSignGeo, materials.sign);
+      sign.position.set(0, 2.29, 0.12);
       group.add(sign);
     }
+
+    group.userData.type = type;
     scene.add(group);
     return group;
   }
 
-  function makePedestrian(color) {
-    const group = new THREE.Group();
-    const torso = new THREE.Mesh(torsoGeo, materialFor(color, { roughness: 0.9 }));
-    torso.position.y = 1.05;
-    torso.castShadow = true;
-    group.add(torso);
-    const head = new THREE.Mesh(headGeo, skinMat);
-    head.position.y = 1.52;
-    head.castShadow = true;
-    group.add(head);
-    const leftLeg = new THREE.Mesh(legGeo, legMat);
-    const rightLeg = new THREE.Mesh(legGeo, legMat);
-    leftLeg.position.set(-0.12, 0.43, 0);
-    rightLeg.position.set(0.12, 0.43, 0);
-    leftLeg.castShadow = rightLeg.castShadow = true;
-    group.add(leftLeg, rightLeg);
-    scene.add(group);
-    return { group, leftLeg, rightLeg };
-  }
-
-  function prepareRoute(points) {
-    if (!Array.isArray(points) || points.length < 2) return null;
-    const route = points.map((p) => ({ x: Number(p.x) || 0, z: Number(p.z) || 0 }));
-    let length = 0;
-    const cumulative = [0];
-    for (let i = 0; i < route.length; i++) {
-      const a = route[i];
-      const b = route[(i + 1) % route.length];
-      length += Math.hypot(b.x - a.x, b.z - a.z);
-      cumulative.push(length);
+  function routeInfo(route) {
+    if (!route || route.length < 2) return null;
+    const points = route.map(p => ({ x: p.x, z: p.z }));
+    const lengths = [];
+    let total = 0;
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      const b = points[(i + 1) % points.length];
+      const len = Math.hypot(b.x - a.x, b.z - a.z);
+      lengths.push(len);
+      total += len;
     }
-    if (length < 1) return null;
-    return { points: route, cumulative, length };
+    return { points, lengths, total };
   }
 
-  const routes = (world.trafficRoutes ?? []).map(prepareRoute).filter(Boolean);
-  const pedRoutes = (world.pedestrianPaths ?? [])
-    .map((path) => path.map((p) => ({ x: Number(p.x) || 0, z: Number(p.z) || 0 })))
-    .filter((path) => path.length > 1);
-
-  function pointAt(route, distance) {
-    const d = ((distance % route.length) + route.length) % route.length;
-    let lo = 0;
-    let hi = route.points.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (route.cumulative[mid + 1] <= d) lo = mid + 1;
-      else hi = mid;
+  function pointAt(info, distance) {
+    const d = ((distance % info.total) + info.total) % info.total;
+    let walked = 0;
+    for (let i = 0; i < info.lengths.length; i++) {
+      const len = info.lengths[i];
+      if (d <= walked + len || i === info.lengths.length - 1) {
+        const a = info.points[i];
+        const b = info.points[(i + 1) % info.points.length];
+        const t = len > 0 ? THREE.MathUtils.clamp((d - walked) / len, 0, 1) : 0;
+        return {
+          x: THREE.MathUtils.lerp(a.x, b.x, t),
+          z: THREE.MathUtils.lerp(a.z, b.z, t),
+          heading: Math.atan2(b.x - a.x, -(b.z - a.z)),
+          segment: i
+        };
+      }
+      walked += len;
     }
-    const index = Math.min(lo, route.points.length - 1);
-    const a = route.points[index];
-    const b = route.points[(index + 1) % route.points.length];
-    const segLen = route.cumulative[index + 1] - route.cumulative[index];
-    const t = segLen > 0 ? (d - route.cumulative[index]) / segLen : 0;
-    return {
-      x: a.x + (b.x - a.x) * t,
-      z: a.z + (b.z - a.z) * t,
-      heading: Math.atan2(b.x - a.x, -(b.z - a.z)),
-      index,
-    };
+    return { x: info.points[0].x, z: info.points[0].z, heading: 0, segment: 0 };
   }
 
-  function createCars(count = 26) {
-    if (!routes.length) return;
+  const routes = (world.trafficRoutes || [])
+    .map(routeInfo)
+    .filter(Boolean);
+
+  function addTrafficCar(index) {
+    if (routes.length === 0) return;
+    const route = routes[index % routes.length];
+    const type = index % 9 === 0 ? 'taxi' : 'sedan';
+    const group = makeCar(type);
+    const dist = random() * route.total;
+    const p = pointAt(route, dist);
+    group.position.set(p.x, 0, p.z);
+    group.rotation.y = -p.heading;
+    cars.push({
+      group,
+      route,
+      dist,
+      speed: 8 + random() * 5,
+      targetSpeed: 8 + random() * 5,
+      type,
+      segment: p.segment
+    });
+  }
+
+  for (let i = 0; i < 26; i++) addTrafficCar(i);
+
+  function createPedestrians(count) {
+    const paths = world.pedestrianPaths || [];
+    if (!paths.length) return pedestrians;
     for (let i = 0; i < count; i++) {
-      const route = routes[i % routes.length];
-      const distance = random() * route.length;
-      const taxi = i === 7;
-      const group = makeCar(choose(paintColors), taxi);
-      const car = {
-        group, route,
-        routeIndex: i % routes.length,
-        dist: distance,
-        speed: 0,
-        targetSpeed: 8 + random() * 5,
-        type: taxi ? 'taxi' : 'traffic',
-        length: 4.25,
-      };
-      const point = pointAt(route, distance);
-      group.position.set(point.x, 0, point.z);
-      group.rotation.y = -point.heading;
-      cars.push(car);
-    }
-  }
+      const path = paths[i % paths.length];
+      if (!path || path.length < 2) continue;
+      const group = new THREE.Group();
+      const shirt = materials.shirts[Math.floor(random() * materials.shirts.length)];
+      const torso = new THREE.Mesh(pedTorsoGeo, shirt);
+      torso.position.y = 1.12;
+      torso.castShadow = true;
+      group.add(torso);
 
-  function createPedestrians(count = 64) {
-    if (!pedRoutes.length) return;
-    for (let i = 0; i < count; i++) {
-      const path = pedRoutes[i % pedRoutes.length];
-      const ped = makePedestrian(choose(shirtColors));
+      const head = new THREE.Mesh(pedHeadGeo, materials.skin);
+      head.position.y = 1.64;
+      head.castShadow = true;
+      group.add(head);
+
+      const leftLeg = new THREE.Mesh(pedLegGeo, materials.pants);
+      const rightLeg = new THREE.Mesh(pedLegGeo, materials.pants);
+      leftLeg.position.set(-0.12, 0.48, 0);
+      rightLeg.position.set(0.12, 0.48, 0);
+      group.add(leftLeg, rightLeg);
+      group.userData.legs = [leftLeg, rightLeg];
+
       const start = Math.floor(random() * path.length);
-      const next = path[(start + 1) % path.length];
-      const current = path[start];
-      const heading = Math.atan2(next.x - current.x, -(next.z - current.z));
-      ped.group.position.set(current.x, 0, current.z);
-      ped.group.rotation.y = -heading;
+      group.position.set(path[start].x, 0, path[start].z);
+      scene.add(group);
       pedestrians.push({
-        ...ped,
+        group,
         path,
         seg: start,
         t: random(),
         speed: 1 + random() * 0.6,
+        color: shirt.color,
         fleeTimer: 0,
         fleeX: 0,
         fleeZ: 0,
-        phase: random() * Math.PI * 2,
+        walkPhase: random() * Math.PI * 2
       });
     }
+    return pedestrians;
+  }
+
+  createPedestrians(55);
+
+  function playerPosition() {
+    const state = world.state;
+    if (!state) return { x: 0, z: 0 };
+    const p = state.currentVehicle?.pos || state.player?.pos;
+    return p || { x: 0, z: 0 };
+  }
+
+  function trafficCarPosition(car) {
+    return car.group.position;
   }
 
   function updateCars(dt) {
     for (const car of cars) {
-      let target = car.targetSpeed;
+      car.targetSpeed = 8 + (car.speed > 0 ? 0.4 : 0) + random() * 0.001;
       let nearestAhead = Infinity;
+
       for (const other of cars) {
-        if (other === car || other.routeIndex !== car.routeIndex) continue;
+        if (other === car || other.route !== car.route) continue;
         let gap = other.dist - car.dist;
-        if (gap < 0) gap += car.route.length;
+        if (gap < 0) gap += car.route.total;
         if (gap > 0.1 && gap < nearestAhead) nearestAhead = gap;
       }
-      if (nearestAhead < 4.5) target = 0;
-      else if (nearestAhead < 12) target *= Math.max(0.22, (nearestAhead - 3.5) / 9);
 
-      // Slow at intersections when crossing traffic is close ahead.
-      const here = pointAt(car.route, car.dist);
-      const fx = Math.sin(here.heading);
-      const fz = -Math.cos(here.heading);
+      if (nearestAhead < 12) {
+        car.targetSpeed = Math.min(car.targetSpeed, nearestAhead < 4 ? 0 : car.speed * 0.45);
+      }
+
+      const p = trafficCarPosition(car);
       for (const other of cars) {
-        if (other === car || other.routeIndex === car.routeIndex) continue;
-        const dx = other.group.position.x - car.group.position.x;
-        const dz = other.group.position.z - car.group.position.z;
+        if (other === car) continue;
+        const q = trafficCarPosition(other);
+        const dx = q.x - p.x;
+        const dz = q.z - p.z;
         const distance = Math.hypot(dx, dz);
-        if (distance < 9 && distance > 0.1 && dx * fx + dz * fz > 0.5) {
-          target = Math.min(target, car.targetSpeed * 0.4);
+        if (distance > 0.1 && distance < 9) {
+          const forward = new THREE.Vector2(-Math.sin(car.group.rotation.y), -Math.cos(car.group.rotation.y));
+          const toward = new THREE.Vector2(dx / distance, dz / distance);
+          if (forward.dot(toward) > 0.45 && other.route !== car.route) {
+            car.targetSpeed = Math.min(car.targetSpeed, car.speed * 0.4);
+          }
         }
       }
 
-      const accel = target < car.speed ? 7 : 2.4;
-      car.speed += Math.sign(target - car.speed) * Math.min(Math.abs(target - car.speed), accel * dt);
-      car.dist = (car.dist + car.speed * dt) % car.route.length;
+      car.speed = THREE.MathUtils.damp(car.speed, car.targetSpeed, 1.8, dt);
+      car.dist = (car.dist + car.speed * dt) % car.route.total;
       const point = pointAt(car.route, car.dist);
       car.group.position.set(point.x, 0, point.z);
       car.group.rotation.y = -point.heading;
+      car.segment = point.segment;
     }
-  }
-
-  function policePositions() {
-    const state = world.state ?? {};
-    const source = state.police?.units ?? state.police?.cars ?? state.policeUnits ?? [];
-    if (Array.isArray(source)) {
-      return source.map((u) => u?.group?.position ?? u?.pos ?? u?.position).filter(Boolean);
-    }
-    return [];
   }
 
   function updatePedestrians(dt) {
-    const state = world.state ?? {};
-    const playerPos = state.currentVehicle?.pos ?? state.player?.pos;
-    const vehicleSpeed = Math.abs(Number(state.currentVehicle?.speed) || 0);
-    const police = state.wanted > 0 ? policePositions() : [];
+    const state = world.state;
+    const player = playerPosition();
+    const vehicleSpeed = Math.abs(state?.currentVehicle?.speed || 0);
+    const wanted = (state?.wanted || 0) > 0;
+    const policePosition = state?.policePosition;
 
     for (const ped of pedestrians) {
-      let fleeing = ped.fleeTimer > 0;
-      if (!fleeing && playerPos) {
-        const dx = ped.group.position.x - playerPos.x;
-        const dz = ped.group.position.z - playerPos.z;
-        if (Math.hypot(dx, dz) < 8 && state.currentVehicle && vehicleSpeed > 5) {
-          const len = Math.hypot(dx, dz) || 1;
-          ped.fleeX = dx / len;
-          ped.fleeZ = dz / len;
-          ped.fleeTimer = 3;
-          fleeing = true;
-        } else if (police.length) {
-          let nearest = null;
-          let nearestDist = Infinity;
-          for (const unit of police) {
-            const ux = unit.x ?? 0;
-            const uz = unit.z ?? 0;
-            const d = (ped.group.position.x - ux) ** 2 + (ped.group.position.z - uz) ** 2;
-            if (d < nearestDist) { nearestDist = d; nearest = unit; }
-          }
-          if (nearest && nearestDist < 49) {
-            const dx = ped.group.position.x - (nearest.x ?? 0);
-            const dz = ped.group.position.z - (nearest.z ?? 0);
-            const len = Math.hypot(dx, dz) || 1;
-            ped.fleeX = dx / len;
-            ped.fleeZ = dz / len;
-            ped.fleeTimer = 3;
-            fleeing = true;
-          }
-        }
+      const pos = ped.group.position;
+      const dx = pos.x - player.x;
+      const dz = pos.z - player.z;
+      const distance = Math.hypot(dx, dz);
+      const policeNearby = wanted && policePosition &&
+        Math.hypot(pos.x - policePosition.x, pos.z - policePosition.z) < 14;
+
+      if ((vehicleSpeed > 5 && distance < 8) || policeNearby) {
+        ped.fleeTimer = Math.max(ped.fleeTimer, 3);
+        const length = Math.max(distance, 0.001);
+        ped.fleeX = dx / length;
+        ped.fleeZ = dz / length;
       }
 
-      if (fleeing) {
+      if (ped.fleeTimer > 0) {
         ped.fleeTimer = Math.max(0, ped.fleeTimer - dt);
-        ped.group.position.x += ped.fleeX * 3.5 * dt;
-        ped.group.position.z += ped.fleeZ * 3.5 * dt;
-        ped.group.rotation.y = -Math.atan2(ped.fleeX, -ped.fleeZ);
-        ped.phase += dt * 13;
+        pos.x += ped.fleeX * 3.5 * dt;
+        pos.z += ped.fleeZ * 3.5 * dt;
+        ped.group.rotation.y = Math.atan2(ped.fleeX, -ped.fleeZ);
       } else {
         const a = ped.path[ped.seg];
-        const b = ped.path[(ped.seg + 1) % ped.path.length];
-        const dx = b.x - a.x;
-        const dz = b.z - a.z;
-        const length = Math.hypot(dx, dz) || 1;
+        const nextSeg = (ped.seg + 1) % ped.path.length;
+        const b = ped.path[nextSeg];
+        const length = Math.max(Math.hypot(b.x - a.x, b.z - a.z), 0.001);
         ped.t += (ped.speed * dt) / length;
         while (ped.t >= 1) {
           ped.t -= 1;
-          ped.seg = (ped.seg + 1) % ped.path.length;
+          ped.seg = nextSeg;
+          const next = (ped.seg + 1) % ped.path.length;
+          if (next === 0 && random() < 0.25) ped.speed = 1 + random() * 0.6;
         }
-        const from = ped.path[ped.seg];
-        const to = ped.path[(ped.seg + 1) % ped.path.length];
-        ped.group.position.set(from.x + (to.x - from.x) * ped.t, 0, from.z + (to.z - from.z) * ped.t);
-        ped.group.rotation.y = -Math.atan2(to.x - from.x, -(to.z - from.z));
-        ped.phase += dt * 7;
+        const start = ped.path[ped.seg];
+        const end = ped.path[(ped.seg + 1) % ped.path.length];
+        pos.x = THREE.MathUtils.lerp(start.x, end.x, ped.t);
+        pos.z = THREE.MathUtils.lerp(start.z, end.z, ped.t);
+        ped.group.rotation.y = Math.atan2(end.x - start.x, -(end.z - start.z));
       }
-      const swing = Math.sin(ped.phase) * (fleeing ? 0.68 : 0.38);
-      ped.leftLeg.rotation.x = swing;
-      ped.rightLeg.rotation.x = -swing;
+
+      ped.walkPhase += dt * (ped.fleeTimer > 0 ? 12 : 7);
+      const legs = ped.group.userData.legs;
+      if (legs) {
+        legs[0].rotation.x = Math.sin(ped.walkPhase) * 0.42;
+        legs[1].rotation.x = -Math.sin(ped.walkPhase) * 0.42;
+      }
     }
   }
 
-  createCars(26);
+  function update(dt) {
+    if (!Number.isFinite(dt) || dt <= 0) return;
+    const state = world.state;
+    if (state?.paused || state?.screen === 'paused') return;
+    const factor = state?.screen === 'title' ? 0.5 : 1;
+    const step = Math.min(dt, 0.1) * factor;
+    updateCars(step);
+    updatePedestrians(step);
+  }
 
-  return {
-    cars,
-    pedestrians,
-    createPedestrians,
-    update(dt) {
-      if (!Number.isFinite(dt) || dt <= 0) return;
-      const state = world.state ?? {};
-      if (state.paused || state.screen === 'paused' || state.screen === 'over') return;
-      const factor = state.screen === 'title' ? 0.5 : 1;
-      const step = Math.min(dt, 0.1) * factor;
-      updateCars(step);
-      updatePedestrians(step);
-    },
-  };
+  return { cars, pedestrians, createPedestrians, update };
 }

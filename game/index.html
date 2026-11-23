@@ -2,9 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Sunline — City of Tides</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#171715">
   <link rel="icon" href="data:,">
+  <title>Sunline — City of Tides</title>
   <link rel="stylesheet" href="./src/style.css">
   <script type="importmap">
     {"imports":{"three":"./vendor/three.min.js"}}
@@ -14,61 +15,73 @@
   <canvas id="game" aria-label="Sunline game canvas"></canvas>
 
   <div id="hud" hidden>
-    <section id="vitals" class="hud-panel" aria-label="Player status">
-      <div>HEALTH</div>
-      <div id="health-track"><div id="health-fill"></div></div>
+    <section class="hud-corner hud-left" aria-label="Player status">
+      <div class="health-row">
+        <span class="hud-label">HEALTH</span>
+        <div id="health-bar"><div id="health-fill"></div></div>
+      </div>
       <div id="cash">$250</div>
     </section>
-    <section id="wanted-clock" class="hud-panel" aria-label="Wanted level and time">
+
+    <section class="hud-corner hud-right" aria-label="World status">
       <div id="stars" aria-label="Wanted level"></div>
       <div id="clock">17:15</div>
     </section>
-    <section id="mission-banner" hidden>
+
+    <div id="mission-banner" hidden>
+      <div class="eyebrow">CURRENT JOB</div>
       <div id="mission-title"></div>
       <div id="mission-objective"></div>
-    </section>
-    <canvas id="minimap" width="180" height="180" aria-label="City minimap"></canvas>
-    <div id="speed">0 km/h</div>
+    </div>
+
     <div id="prompt" hidden></div>
+
+    <div class="hud-corner hud-map">
+      <canvas id="minimap" width="180" height="180" aria-label="Minimap"></canvas>
+      <div class="map-caption">MARAVELA</div>
+    </div>
+
+    <div class="hud-corner hud-speed">
+      <span class="eyebrow">SPEED</span>
+      <strong id="speed">0 km/h</strong>
+    </div>
   </div>
 
-  <main id="title-screen" class="overlay">
-    <section class="card">
-      <p class="eyebrow">Maravela</p>
-      <h1>SUNLINE</h1>
-      <p class="subtitle">City of Tides</p>
-      <button id="start-button">Start exploring</button>
-      <p class="instructions">Click or press Enter to start<br>WASD move / drive · Mouse look · E enter or exit · Space jump · P pause</p>
-    </section>
-  </main>
+  <section id="title-screen" class="overlay">
+    <div class="panel title-panel">
+      <div class="eyebrow">A COASTAL CITY STORY</div>
+      <h1>SUNLINE <span>— City of Tides</span></h1>
+      <p class="hero-name">Starring Nia Solis</p>
+      <p class="title-subtitle">Every road leads somewhere. Every tide brings something back.</p>
+      <button id="title-start" class="primary-button">Click or press Enter to start</button>
+      <p class="controls">WASD to move or drive <i>·</i> E enter/exit vehicle <i>·</i> Mouse to look <i>·</i> P pause</p>
+    </div>
+  </section>
 
-  <main id="pause-screen" class="overlay" hidden>
-    <section class="card">
-      <p class="eyebrow">Maravela</p>
+  <section id="pause-screen" class="overlay" hidden>
+    <div class="panel menu-panel">
+      <div class="eyebrow">TAKE A BREATHER</div>
       <h2>Paused</h2>
-      <p class="subtitle">Take a breath. The tide can wait.</p>
-      <div class="button-row">
-        <button id="resume-button">Resume</button>
-        <button id="restart-button" class="secondary">Restart</button>
+      <button id="resume-button" class="primary-button">Resume</button>
+      <button id="restart-button" class="secondary-button">Restart</button>
+      <div class="save-actions">
+        <button id="save-button" class="secondary-button">Save</button>
+        <button id="load-button" class="secondary-button">Load</button>
       </div>
-      <div class="button-row">
-        <button id="save-button" class="secondary">Save</button>
-        <button id="load-button" class="secondary">Load</button>
-      </div>
-      <p class="instructions">Press P or Escape to return to Maravela.</p>
-    </section>
-  </main>
+      <p id="save-status" class="save-status" aria-live="polite"></p>
+    </div>
+  </section>
 
-  <main id="over-screen" class="overlay" hidden>
-    <section class="card">
-      <p class="eyebrow">Maravela</p>
-      <h2>Out of the tide</h2>
-      <p class="subtitle">Nia Solis will get another chance.</p>
-      <button id="over-restart-button">Restart</button>
-    </section>
-  </main>
+  <section id="over-screen" class="overlay" hidden>
+    <div class="panel menu-panel">
+      <div class="eyebrow">THE CITY WILL WAIT</div>
+      <h2>Taking a moment</h2>
+      <p>Nia will be back on her feet soon.</p>
+      <button id="over-restart" class="primary-button">Return to Maravela</button>
+    </div>
+  </section>
 
-  <div id="status" aria-live="polite"></div>
+  <div id="status" class="visually-hidden" aria-live="polite"></div>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>

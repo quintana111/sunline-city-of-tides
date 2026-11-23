@@ -1,148 +1,246 @@
-// Combat (design §10). Written fresh 2026-11-24 (Builder B).
-// F punch (~2u, cooldown), left-mouse hitscan, crime reports for public
-// violence, damagePlayer(), getWeaponState(). No gore: targets flee.
+// Combat for Sunline: City of Tides — punch (F) + hitscan shoot (LMB).
+// Forward = (sin h, 0, -cos h). No Math.random(). Effects are disposed.
 import * as THREE from 'three';
 
-const PUNCH_RANGE = 2.2;
-const PUNCH_COOLDOWN = 0.55;
-const SHOT_RANGE = 32;
-const SHOT_COOLDOWN = 0.4;
-
 export function createCombat(scene, world, state, police, traffic) {
+  const pedestrianHp = new Map();
+  const downTimers = new Map();
+  const effects = [];
+
   let punchCooldown = 0;
-  let shotCooldown = 0;
-  let wasFPressed = false;
-  let wasMouseDown = false;
-  let flashTimer = 0;
+  let shootCooldown = 0;
+  let previousPunch = false;
+  let previousShoot = false;
 
-  // Short-lived tracer line for the hitscan shot.
-  const flashGeo = new THREE.BufferGeometry();
-  flashGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
-  const flash = new THREE.Line(flashGeo, new THREE.LineBasicMaterial({
-    color: 0xffe9a3, transparent: true, opacity: 0,
-  }));
-  flash.visible = false;
-  flash.frustumCulled = false;
-  scene.add(flash);
+  const safeDt = (dt) => Math.min(Math.max(Number.isFinite(dt) ? dt : 0, 0), 0.1);
 
-  function forward() {
-    const h = state.currentVehicle?.heading ?? state.player.heading;
-    return { x: Math.sin(h), z: -Math.cos(h) };
-  }
-
-  function playerPos() {
-    return state.currentVehicle?.pos ?? state.player.pos;
-  }
-
-  function nearestPedestrian(maxDist, maxAngleCos = 0.35) {
-    const peds = traffic?.pedestrians ?? [];
-    const pos = playerPos();
-    const fwd = forward();
-    let best = null;
-    let bestDist = maxDist;
-    for (const ped of peds) {
-      const pp = ped.group?.position;
-      if (!pp) continue;
-      const dx = pp.x - pos.x;
-      const dz = pp.z - pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d > bestDist || d < 0.05) continue;
-      const dot = (dx * fwd.x + dz * fwd.z) / d;
-      if (dot < maxAngleCos) continue;
-      bestDist = d;
-      best = ped;
+  function pedestrians() {
+    if (traffic && Array.isArray(traffic.pedestrians)) return traffic.pedestrians;
+    if (typeof window !== 'undefined') {
+      const fallback = window.__game?.traffic?.pedestrians;
+      if (Array.isArray(fallback)) return fallback;
     }
-    return best;
+    return [];
   }
 
-  function fleePed(ped) {
-    if (!ped) return;
-    const pos = playerPos();
-    const pp = ped.group.position;
-    const dx = pp.x - pos.x;
-    const dz = pp.z - pos.z;
-    const len = Math.hypot(dx, dz) || 1;
-    ped.fleeX = dx / len;
-    ped.fleeZ = dz / len;
-    ped.fleeTimer = 4;
+  function playerPosition() {
+    const pos = state?.player?.pos ?? {};
+    return new THREE.Vector3(
+      Number.isFinite(pos.x) ? pos.x : 0,
+      Number.isFinite(pos.y) ? pos.y : 0,
+      Number.isFinite(pos.z) ? pos.z : 0,
+    );
   }
 
-  function punch() {
-    if (punchCooldown > 0 || !state.player.onFoot) return false;
-    punchCooldown = PUNCH_COOLDOWN;
-    const target = nearestPedestrian(PUNCH_RANGE);
-    if (target) {
-      fleePed(target);
-      police?.reportCrime?.('assault', playerPos(), 30);
+  function playerHeading() {
+    return Number.isFinite(state?.player?.heading) ? state.player.heading : 0;
+  }
+
+  function forwardVector() {
+    const heading = playerHeading();
+    return new THREE.Vector3(Math.sin(heading), 0, -Math.cos(heading));
+  }
+
+  function addEffect(object, life) {
+    if (!scene?.add || !object) return;
+    scene.add(object);
+    effects.push({ object, life });
+  }
+
+  function removeEffect(effect) {
+    scene?.remove?.(effect.object);
+    effect.object.geometry?.dispose?.();
+    const material = effect.object.material;
+    if (Array.isArray(material)) {
+      for (const item of material) item?.dispose?.();
+    } else {
+      material?.dispose?.();
     }
-    return Boolean(target);
+  }
+
+  function tickEffects(dt) {
+    for (let i = effects.length - 1; i >= 0; i -= 1) {
+      effects[i].life -= dt;
+      if (effects[i].life <= 0) {
+        removeEffect(effects[i]);
+        effects.splice(i, 1);
+      }
+    }
+  }
+
+  function tickDowned(dt) {
+    for (const [ped, timer] of downTimers) {
+      const next = timer - dt;
+      if (next <= 0) {
+        downTimers.delete(ped);
+        pedestrianHp.set(ped, 100);
+        if (ped?.group) ped.group.rotation.x = 0;
+        if (ped && Number.isFinite(ped.fleeTimer)) ped.fleeTimer = Math.max(ped.fleeTimer, 4);
+      } else {
+        downTimers.set(ped, next);
+      }
+    }
+  }
+
+  function makePunchEffect() {
+    const position = playerPosition();
+    const forward = forwardVector();
+    const heading = playerHeading();
+    const geometry = new THREE.BoxGeometry(0.9, 0.035, 0.32);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffe7a3, transparent: true, opacity: 0.58, depthWrite: false,
+    });
+    const arc = new THREE.Mesh(geometry, material);
+    arc.position.set(position.x + forward.x * 1.35, position.y + 1.05, position.z + forward.z * 1.35);
+    arc.rotation.y = -heading;
+    addEffect(arc, 0.15);
+  }
+
+  function getPedestrians() {
+    return pedestrians().filter((ped) => ped?.group?.position);
+  }
+
+  function isDown(ped) {
+    return downTimers.has(ped);
+  }
+
+  function damagePedestrian(ped, amount) {
+    if (!ped || isDown(ped)) return;
+    const hp = pedestrianHp.has(ped) ? pedestrianHp.get(ped) : 100;
+    const nextHp = hp - amount;
+    pedestrianHp.set(ped, nextHp);
+    const forward = forwardVector();
+    // Small shove: a full 1.5-unit knockback pushes the ped out of the
+    // 2.2-unit punch range, so repeated punches could never knock one down.
+    ped.group.position.x += forward.x * 0.3;
+    ped.group.position.z += forward.z * 0.3;
+    if (nextHp <= 0) {
+      downTimers.set(ped, 4);
+      ped.group.rotation.x = -Math.PI / 2;
+      ped.fleeTimer = 4;
+    }
+  }
+
+  function findPunchTarget(position, forward) {
+    let nearest = null;
+    let nearestDistance = Infinity;
+    const minDot = Math.cos((100 * Math.PI) / 360);
+    for (const ped of getPedestrians()) {
+      if (isDown(ped)) continue;
+      const pedPosition = ped.group.position;
+      const dx = pedPosition.x - position.x;
+      const dz = pedPosition.z - position.z;
+      const distance = Math.hypot(dx, dz);
+      if (distance > 2.2 || distance <= 0) continue;
+      const dot = (dx * forward.x + dz * forward.z) / distance;
+      if (dot < minDot || distance >= nearestDistance) continue;
+      nearest = ped;
+      nearestDistance = distance;
+    }
+    return nearest;
   }
 
   function shoot() {
-    if (shotCooldown > 0 || !state.player.onFoot) return false;
-    shotCooldown = SHOT_COOLDOWN;
-    const pos = playerPos();
-    const fwd = forward();
-    const from = new THREE.Vector3(pos.x, 1.4, pos.z);
-    const to = new THREE.Vector3(pos.x + fwd.x * SHOT_RANGE, 1.4, pos.z + fwd.z * SHOT_RANGE);
-    const positions = flash.geometry.getAttribute('position');
-    positions.setXYZ(0, from.x, from.y, from.z);
-    positions.setXYZ(1, to.x, to.y, to.z);
-    positions.needsUpdate = true;
-    flash.material.opacity = 0.9;
-    flash.visible = true;
-    flashTimer = 0.09;
-    const target = nearestPedestrian(SHOT_RANGE, 0.92);
-    if (target) fleePed(target);
-    police?.reportCrime?.('weaponFire', pos, 45);
-    return true;
-  }
+    const position = playerPosition();
+    const forward = forwardVector();
+    const muzzle = new THREE.Vector3(
+      position.x + forward.x * 0.35,
+      position.y + 1.4,
+      position.z + forward.z * 0.35,
+    );
+    const maxRange = 40;
+    let hitPed = null;
+    let hitDistance = maxRange;
 
-  function damagePlayer(amount, source) {
-    const dmg = Math.max(0, Number(amount) || 0);
-    state.player.health = THREE.MathUtils.clamp(state.player.health - dmg, 0, 100);
-    if (state.player.health <= 0 && state.screen === 'play') {
-      state.screen = 'over';
+    for (const ped of getPedestrians()) {
+      if (isDown(ped)) continue;
+      const p = ped.group.position;
+      const target = new THREE.Vector3(p.x, p.y + 1, p.z);
+      const offset = target.sub(muzzle);
+      const along = offset.dot(forward);
+      if (along < 0 || along > maxRange) continue;
+      const closest = muzzle.clone().addScaledVector(forward, along);
+      const perpendicular = closest.distanceTo(target);
+      if (perpendicular <= 1.2 && along < hitDistance) {
+        hitDistance = along;
+        hitPed = ped;
+      }
     }
-    return state.player.health;
-  }
 
-  function getWeaponState() {
-    return {
-      weapon: 'fists',
-      punchCooldown: Math.max(0, punchCooldown),
-      shotCooldown: Math.max(0, shotCooldown),
-      canPunch: punchCooldown <= 0 && state.player.onFoot,
-      canShoot: shotCooldown <= 0 && state.player.onFoot,
-    };
+    const end = muzzle.clone().addScaledVector(forward, hitDistance);
+    if (hitPed) damagePedestrian(hitPed, 50);
+
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints([muzzle, end]);
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffe4a3, transparent: true, opacity: 0.9 });
+    addEffect(new THREE.Line(lineGeometry, lineMaterial), 0.06);
+
+    const flashGeometry = new THREE.SphereGeometry(0.075, 8, 6);
+    const flashMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffd36a, emissive: 0xff8a1c, emissiveIntensity: 2, transparent: true, opacity: 0.95,
+    });
+    const flash = new THREE.Mesh(flashGeometry, flashMaterial);
+    flash.position.copy(muzzle);
+    addEffect(flash, 0.06);
+
+    police?.reportCrime?.('weaponFire', position, 60);
   }
 
   function update(dt, input) {
-    if (!Number.isFinite(dt) || dt <= 0) return;
-    punchCooldown = Math.max(0, punchCooldown - dt);
-    shotCooldown = Math.max(0, shotCooldown - dt);
-    if (flashTimer > 0) {
-      flashTimer -= dt;
-      if (flashTimer <= 0) {
-        flash.visible = false;
-        flash.material.opacity = 0;
+    const step = safeDt(dt);
+    const keys = input?.keys instanceof Set ? input.keys : state?.input?.keys;
+    const buttons = input?.mouseButtons instanceof Set ? input.mouseButtons : state?.input?.mouseButtons;
+    const punchHeld = keys instanceof Set && keys.has('KeyF');
+    const shootHeld = buttons instanceof Set && buttons.has(0);
+    const punchPressed = punchHeld && !previousPunch;
+    previousPunch = punchHeld;
+    previousShoot = shootHeld;
+
+    if (state?.screen !== 'play' || state?.paused) return;
+
+    punchCooldown = Math.max(0, punchCooldown - step);
+    shootCooldown = Math.max(0, shootCooldown - step);
+    tickEffects(step);
+    tickDowned(step);
+
+    if (state?.currentVehicle || state?.player?.onFoot === false) return;
+
+    if (punchPressed && punchCooldown <= 0) {
+      punchCooldown = 0.6;
+      makePunchEffect();
+      const position = playerPosition();
+      const target = findPunchTarget(position, forwardVector());
+      if (target) {
+        damagePedestrian(target, 34);
+        police?.reportCrime?.('assault', position, 40);
       }
     }
-    if (state.paused || state.screen !== 'play') return;
-    const keys = input?.keys ?? new Set();
-    const fPressed = keys.has('KeyF');
-    if (fPressed && !wasFPressed) punch();
-    wasFPressed = fPressed;
-    const mouseDown = (input?.mouseButtons ?? new Set()).has(0);
-    if (mouseDown && !wasMouseDown) shoot();
-    wasMouseDown = mouseDown;
+
+    if (shootHeld && shootCooldown <= 0) {
+      shootCooldown = 0.35;
+      shoot();
+    }
   }
 
-  return {
-    update,
-    punch,
-    shoot,
-    damagePlayer,
-    getWeaponState,
-  };
+  function damagePlayer(amount, source) {
+    if (state?.screen !== 'play') return state?.player?.health ?? 0;
+    const current = Number.isFinite(state?.player?.health) ? state.player.health : 100;
+    const damage = Number.isFinite(amount) ? amount : 0;
+    const health = Math.min(100, Math.max(0, current - damage));
+    state.player.health = health;
+    if (health <= 0) state.screen = 'over';
+    return health;
+  }
+
+  function getWeaponState() {
+    const driving = !!state?.currentVehicle || state?.player?.onFoot === false;
+    return {
+      weapon: 'fists',
+      punchCooldown,
+      shootCooldown,
+      canPunch: !driving && state?.screen === 'play' && !state?.paused && punchCooldown <= 0,
+      canShoot: !driving && state?.screen === 'play' && !state?.paused && shootCooldown <= 0,
+    };
+  }
+
+  return { update, damagePlayer, getWeaponState };
 }

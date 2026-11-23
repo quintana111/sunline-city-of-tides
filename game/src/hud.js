@@ -1,223 +1,364 @@
-// HUD + minimap (design §11). Written fresh 2026-11-24 (Builder B).
-// Replaces main.js's fallback HUD: health bar, cash, wanted stars,
-// mission banner, speed, clock, contextual prompts, live 2D minimap.
-// Minimap roads are BRIGHT and THICK, police dots BIG (screenshot legibility).
-import * as THREE from 'three';
-
+// HUD for Sunline: City of Tides — drives the index.html HUD ids every
+// update() from state alone; canvas minimap; dialogue + toast. No gameplay
+// state is mutated except clearing shown message/toast and overlay flags.
 export function createHud(state, world) {
-  const healthFill = document.getElementById('health-fill');
-  const cashEl = document.getElementById('cash');
-  const starsEl = document.getElementById('stars');
-  const speedEl = document.getElementById('speed');
-  const clockEl = document.getElementById('clock');
-  const banner = document.getElementById('mission-banner');
-  const bannerTitle = document.getElementById('mission-title');
-  const bannerObjective = document.getElementById('mission-objective');
-  const promptEl = document.getElementById('prompt');
-  const mapCanvas = document.getElementById('minimap');
+  const doc = typeof document !== 'undefined' ? document : null;
+  let hudRoot = doc?.getElementById?.('hud') ?? null;
+  if (!hudRoot && doc?.createElement) {
+    hudRoot = doc.createElement('div');
+    hudRoot.id = 'hud';
+    doc.body?.appendChild?.(hudRoot);
+  }
 
-  const starSpans = [];
-  if (starsEl) {
-    starsEl.replaceChildren();
-    for (let i = 0; i < 5; i++) {
-      const star = document.createElement('span');
+  function getElement(id) {
+    return doc?.getElementById?.(id) ?? null;
+  }
+
+  function createPiece(id, parent = hudRoot, tag = 'div') {
+    if (!doc?.createElement) return null;
+    let element = getElement(id);
+    if (!element) {
+      element = doc.createElement(tag);
+      element.id = id;
+      parent?.appendChild?.(element);
+    }
+    return element;
+  }
+
+  const missionBanner = getElement('mission-banner');
+  const missionTimer = createPiece('mission-timer', missionBanner || hudRoot);
+  if (missionTimer?.style) {
+    missionTimer.style.color = '#f2c66d';
+    missionTimer.style.fontWeight = 'bold';
+  }
+
+  const dialogue = createPiece('dialogue');
+  const dialogueSpeaker = createPiece('dialogue-speaker', dialogue, 'div');
+  const dialogueText = createPiece('dialogue-text', dialogue, 'div');
+  const toast = createPiece('toast');
+  if (dialogue?.style) {
+    dialogue.style.position = 'fixed';
+    dialogue.style.left = '50%';
+    dialogue.style.bottom = '5%';
+    dialogue.style.transform = 'translateX(-50%)';
+  }
+  if (toast?.style) {
+    toast.style.position = 'fixed';
+    toast.style.left = '50%';
+    toast.style.top = '12%';
+    toast.style.transform = 'translateX(-50%)';
+  }
+
+  const starsElement = getElement('stars');
+  if (starsElement && doc?.createElement && !starsElement.dataset?.sunlineStarsBuilt) {
+    starsElement.textContent = '';
+    for (let i = 0; i < 5; i += 1) {
+      const star = doc.createElement('span');
       star.textContent = '★';
-      starsEl.appendChild(star);
-      starSpans.push(star);
+      // Inline size: the wanted level must read at a glance in screenshots.
+      if (star.style) {
+        star.style.fontSize = '20px';
+        star.style.letterSpacing = '2px';
+      }
+      starsElement.appendChild(star);
+    }
+    if (starsElement.dataset) starsElement.dataset.sunlineStarsBuilt = 'true';
+  }
+
+  let frameCount = 0;
+  let dialogueElapsed = 0;
+  let toastElapsed = 0;
+  let lastDialogue = null;
+  let lastToast = null;
+
+  function setToast(text) {
+    if (!state?.mission) return;
+    state.mission.toast = text;
+    toastElapsed = 0;
+    lastToast = text;
+    if (toast) {
+      toast.textContent = text ?? '';
+      toast.hidden = !text;
     }
   }
 
-  let frame = 0;
+  function showMessage(speaker, text) {
+    if (!state?.mission) return;
+    state.mission.message = { speaker, text };
+    dialogueElapsed = 0;
+    lastDialogue = state.mission.message;
+    if (dialogueSpeaker) dialogueSpeaker.textContent = speaker ?? '';
+    if (dialogueText) dialogueText.textContent = text ?? '';
+    if (dialogue) dialogue.hidden = !(speaker || text);
+  }
 
-  function formatClock() {
-    const totalMinutes = Math.floor((((state.timeOfDay % 24) + 24) % 24) * 60);
-    return `${String(Math.floor(totalMinutes / 60)).padStart(2, '0')}:${String(totalMinutes % 60).padStart(2, '0')}`;
+  function formatClock(timeOfDay) {
+    const value = Number.isFinite(timeOfDay) ? timeOfDay : 0;
+    const wrapped = ((value % 24) + 24) % 24;
+    const hours = Math.floor(wrapped);
+    const minutes = Math.floor((wrapped - hours) * 60);
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
+
+  function formatTimer(timeLeft) {
+    const total = Math.max(0, Math.floor(Number.isFinite(timeLeft) ? timeLeft : 0));
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function setHidden(id, hidden) {
+    const element = getElement(id);
+    if (element) element.hidden = hidden;
   }
 
   function drawMinimap() {
-    if (!mapCanvas) return;
-    const ctx = mapCanvas.getContext('2d');
-    if (!ctx) return;
-    const w = mapCanvas.width;
-    const h = mapCanvas.height;
-    ctx.clearRect(0, 0, w, h);
-    // Dark land so the bright roads read as a street map, not a beige grid
-    // (was #1b2b2e with faint blocks — at 142 px it read as a grid).
-    ctx.fillStyle = '#0e1a1d';
-    ctx.fillRect(0, 0, w, h);
+    const canvas = getElement('minimap');
+    if (!canvas?.getContext) return;
+    let context;
+    try {
+      context = canvas.getContext('2d');
+    } catch {
+      return;
+    }
+    if (!context) return;
 
-    const size = world.size || 1120;
-    const mapX = (x) => ((x + size / 2) / size) * w;
-    const mapY = (z) => ((z + size / 2) / size) * h;
+    const width = canvas.width || 180;
+    const height = canvas.height || 180;
+    const size = Number.isFinite(world?.size) && world.size > 0 ? world.size : 1120;
+    const mapX = (x) => ((x + size / 2) / size) * width;
+    const mapY = (z) => ((z + size / 2) / size) * height;
 
-    // Beach / ocean strip at the south edge.
-    ctx.fillStyle = '#c9a86a';
-    ctx.fillRect(0, mapY(560), w, h - mapY(560));
-    ctx.fillStyle = '#2e7f96';
-    ctx.fillRect(0, mapY(620), w, h - mapY(620));
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = '#142329';
+    context.fillRect(0, 0, width, height);
 
-    // Blocks: a touch lighter than the land, so blocks vs roads separate.
-    ctx.fillStyle = 'rgba(64,96,104,0.55)';
-    for (const block of world.blocks ?? []) {
-      ctx.fillRect(mapX(block.minX), mapY(block.minZ),
-        ((block.maxX - block.minX) / size) * w, ((block.maxZ - block.minZ) / size) * h);
+    // City blocks use { minX, maxX, minZ, maxZ } in world.js.
+    const blocks = Array.isArray(world?.blocks) ? world.blocks : [];
+    context.fillStyle = 'rgba(205,178,133,.13)';
+    for (const block of blocks) {
+      if (!Number.isFinite(block?.minX) || !Number.isFinite(block?.maxX) ||
+          !Number.isFinite(block?.minZ) || !Number.isFinite(block?.maxZ)) continue;
+      context.fillRect(
+        mapX(block.minX), mapY(block.minZ),
+        ((block.maxX - block.minX) / size) * width,
+        ((block.maxZ - block.minZ) / size) * height,
+      );
     }
 
-    // Roads: dark casing + BRIGHT core. Kept THIN (5/3 px): the first
-    // polish pass used 9/6 px, which covered ~half the 180 px canvas and
-    // turned the map into a cream grid with dark blocks — the opposite of
-    // a street map. Thin bright lines on dark land read as streets.
-    ctx.lineCap = 'round';
-    for (const pass of [
-      { color: '#050d0f', width: 5 },
-      { color: '#ffe9a8', width: 3 },
-    ]) {
-      ctx.strokeStyle = pass.color;
-      ctx.lineWidth = pass.width;
-      for (const line of world.roadLines ?? []) {
-        ctx.beginPath();
-        ctx.moveTo(mapX(line), 0);
-        ctx.lineTo(mapX(line), h);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(0, mapY(line));
-        ctx.lineTo(w, mapY(line));
-        ctx.stroke();
+    const roads = Array.isArray(world?.roadLines) ? world.roadLines : [];
+    function drawRoad(x1, z1, x2, z2) {
+      const aX = mapX(x1);
+      const aY = mapY(z1);
+      const bX = mapX(x2);
+      const bY = mapY(z2);
+      context.beginPath();
+      context.moveTo(aX, aY);
+      context.lineTo(bX, bY);
+      context.lineCap = 'round';
+      context.lineWidth = 8;
+      context.strokeStyle = 'rgba(20,35,41,0.9)';
+      context.stroke();
+      context.beginPath();
+      context.moveTo(aX, aY);
+      context.lineTo(bX, bY);
+      context.lineWidth = 5;
+      context.strokeStyle = 'rgba(245,236,210,0.95)';
+      context.stroke();
+    }
+    for (const road of roads) {
+      if (!Number.isFinite(road)) continue;
+      drawRoad(road, -size / 2, road, size / 2);
+      drawRoad(-size / 2, road, size / 2, road);
+    }
+
+    const game = typeof window !== 'undefined' ? window.__game : null;
+    const policeUnits = state?.police?.units ?? game?.police?.units ?? [];
+    if (Array.isArray(policeUnits)) {
+      for (const unit of policeUnits) {
+        const position = unit?.group?.position ?? unit?.pos ?? unit?.position;
+        if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.z)) continue;
+        const x = mapX(position.x);
+        const y = mapY(position.z);
+        context.beginPath();
+        context.arc(x, y, 7, 0, Math.PI * 2);
+        context.fillStyle = '#3b82f6';
+        context.fill();
+        context.lineWidth = 2;
+        context.strokeStyle = '#ffffff';
+        context.stroke();
       }
     }
 
-    // Traffic dots.
-    const g = typeof window !== 'undefined' ? window.__game : null;
-    ctx.fillStyle = '#e8795b';
-    for (const car of g?.traffic?.cars ?? []) {
-      const p = car.group?.position;
-      if (p) ctx.fillRect(mapX(p.x) - 2, mapY(p.z) - 2, 4, 4);
+    const mission = state?.mission;
+    const marker = mission?.marker ?? mission?.target;
+    if (marker && Number.isFinite(marker.x) && Number.isFinite(marker.z)) {
+      const x = mapX(marker.x);
+      const y = mapY(marker.z);
+      context.save();
+      context.translate(x, y);
+      context.rotate(Math.PI / 4);
+      context.fillStyle = '#f2c66d';
+      context.strokeStyle = '#ffffff';
+      context.lineWidth = 2;
+      context.fillRect(-7, -7, 14, 14);
+      context.strokeRect(-7, -7, 14, 14);
+      context.restore();
     }
 
-    // Mission marker: big gold diamond with dark outline.
-    const missionPoint = missionTargetPoint();
-    if (missionPoint) {
-      const x = mapX(missionPoint.x);
-      const y = mapY(missionPoint.z);
-      ctx.fillStyle = '#ffd15a';
-      ctx.strokeStyle = '#3a2c00';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x, y - 8);
-      ctx.lineTo(x + 8, y);
-      ctx.lineTo(x, y + 8);
-      ctx.lineTo(x - 8, y);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+    const cars = game?.traffic?.cars;
+    if (Array.isArray(cars)) {
+      for (const car of cars) {
+        const position = car?.group?.position ?? car?.pos ?? car?.position;
+        if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.z)) continue;
+        context.beginPath();
+        context.arc(mapX(position.x), mapY(position.z), 2.5, 0, Math.PI * 2);
+        context.fillStyle = '#f28b42';
+        context.fill();
+      }
     }
 
-    // Police dots: BIG red/blue circles with white ring.
-    const units = state.police?.units ?? [];
-    for (const unit of units) {
-      const p = unit.pos ?? unit.group?.position;
-      if (!p) continue;
-      const x = mapX(p.x);
-      const y = mapY(p.z);
-      ctx.fillStyle = '#ff3b30';
-      ctx.beginPath();
-      ctx.arc(x, y, 6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = '#2c64ff';
-      ctx.beginPath();
-      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
+    const playerPosition =
+      state?.currentVehicle?.pos ??
+      state?.currentVehicle?.group?.position ??
+      state?.player?.pos;
+    if (playerPosition && Number.isFinite(playerPosition.x) && Number.isFinite(playerPosition.z)) {
+      const heading = Number.isFinite(state?.currentVehicle?.heading)
+        ? state.currentVehicle.heading
+        : Number.isFinite(state?.player?.heading) ? state.player.heading : 0;
+      context.save();
+      context.translate(mapX(playerPosition.x), mapY(playerPosition.z));
+      context.rotate(-heading);
+      context.beginPath();
+      context.moveTo(0, -8);
+      context.lineTo(6, 7);
+      context.lineTo(0, 4);
+      context.lineTo(-6, 7);
+      context.closePath();
+      context.fillStyle = '#ffffff';
+      context.fill();
+      context.restore();
     }
-
-    // Player arrow (rotates with heading) — bigger, with a dark halo so
-    // it reads at small size against the bright roads.
-    const pos = state.currentVehicle?.pos ?? state.player.pos;
-    const heading = state.currentVehicle?.heading ?? state.player.heading;
-    ctx.save();
-    ctx.translate(mapX(pos.x), mapY(pos.z));
-    ctx.rotate(-heading);
-    ctx.fillStyle = '#ffffff';
-    ctx.strokeStyle = '#0a1416';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(0, -12);
-    ctx.lineTo(8.5, 8);
-    ctx.lineTo(0, 4.5);
-    ctx.lineTo(-8.5, 8);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
   }
 
-  function missionTargetPoint() {
-    if (!state.mission?.id) return null;
-    const points = world.missionPoints ?? {};
-    if (state.mission.stage === 0) {
-      const starts = {
-        'first-light': 'parcelPickup', 'harbour-receipt': 'marinaCrate',
-        'wrong-turn': 'mechanicPickup', 'last-ferry': 'cafeDropoff',
-      };
-      return points[starts[state.mission.id]] ?? null;
-    }
-    const dests = {
-      'first-light': 'cafeDropoff', 'harbour-receipt': 'workshopDropoff',
-      'wrong-turn': 'safehouse', 'last-ferry': 'ferryDock',
-    };
-    return points[dests[state.mission.id]] ?? null;
-  }
+  function update(dt) {
+    const step = Math.min(Math.max(Number.isFinite(dt) ? dt : 1 / 60, 0), 0.1);
+    const player = state?.player ?? {};
 
-  function promptText() {
-    const g = typeof window !== 'undefined' ? window.__game : null;
-    if (state.screen !== 'play') return '';
-    if (state.player.onFoot) {
-      if (g?.vehicles?.getNearbyVehicle?.(4)) return 'E — Enter vehicle';
-      const points = world.missionPoints ?? {};
-      const pos = state.player.pos;
-      const starts = ['parcelPickup', 'marinaCrate', 'mechanicPickup', 'cafeDropoff'];
-      if (!state.mission?.id || state.mission?.stage === -1) {
-        for (const key of starts) {
-          const p = points[key];
-          if (p && Math.hypot(pos.x - p.x, pos.z - p.z) < 8) return 'E — Start job';
+    const healthFill = getElement('health-fill');
+    if (healthFill?.style) {
+      const health = Math.min(100, Math.max(0, Number.isFinite(player.health) ? player.health : 0));
+      healthFill.style.width = `${health}%`;
+    }
+
+    const cash = getElement('cash');
+    if (cash) cash.textContent = `$${Math.floor(Number.isFinite(player.cash) ? player.cash : 0)}`;
+
+    if (starsElement) {
+      const wanted = Math.min(5, Math.max(0, Math.floor(state?.wanted ?? 0)));
+      const stars = starsElement.querySelectorAll?.('span') ?? [];
+      stars.forEach((star, index) => {
+        const filled = index < wanted;
+        star.classList?.toggle?.('filled', filled);
+        if (star.style) star.style.color = filled ? '#f2c66d' : 'rgba(255,255,255,0.3)';
+      });
+    }
+
+    const clock = getElement('clock');
+    if (clock) clock.textContent = formatClock(state?.timeOfDay);
+
+    const speed = getElement('speed');
+    if (speed) {
+      if (state?.currentVehicle) {
+        const vehicleSpeed = Number.isFinite(state.currentVehicle.speed)
+          ? Math.abs(state.currentVehicle.speed) : 0;
+        speed.textContent = `${Math.round(vehicleSpeed * 3.6)} km/h`;
+      } else {
+        speed.textContent = 'On foot';
+      }
+    }
+
+    const mission = state?.mission ?? {};
+    const missionActive = !!(mission.id || mission.title);
+    const banner = getElement('mission-banner');
+    if (banner) banner.hidden = !missionActive;
+    const title = getElement('mission-title');
+    if (title) title.textContent = mission.title ?? '';
+    const objective = getElement('mission-objective');
+    if (objective) objective.textContent = mission.objective ?? '';
+    if (missionTimer) {
+      missionTimer.hidden = !missionActive;
+      missionTimer.textContent = missionActive ? formatTimer(mission.timeLeft) : '';
+    }
+
+    const promptElement = getElement('prompt');
+    if (promptElement) {
+      let prompt = '';
+      if (state?.screen === 'play') {
+        if (mission.prompt) {
+          prompt = mission.prompt;
+        } else if (state?.currentVehicle) {
+          prompt = 'E — Exit vehicle';
+        } else {
+          let nearby = false;
+          if (typeof window !== 'undefined') {
+            try {
+              nearby = !!window.__game?.vehicles?.getNearbyVehicle?.(4);
+            } catch {
+              nearby = false;
+            }
+          }
+          if (nearby) prompt = 'E — Enter vehicle';
         }
       }
-      return '';
+      promptElement.textContent = prompt;
+      promptElement.hidden = !prompt;
     }
-    return 'E — Exit vehicle';
+
+    const message = state?.mission?.message ?? null;
+    if (message !== lastDialogue) {
+      lastDialogue = message;
+      dialogueElapsed = 0;
+    }
+    if (message) {
+      dialogueElapsed += step;
+      if (dialogueSpeaker) dialogueSpeaker.textContent = message.speaker ?? '';
+      if (dialogueText) dialogueText.textContent = message.text ?? '';
+      if (dialogue) dialogue.hidden = dialogueElapsed >= 6;
+      if (dialogueElapsed >= 6 && state?.mission?.message === message) {
+        state.mission.message = null;
+        lastDialogue = null;
+      }
+    } else if (dialogue) {
+      dialogue.hidden = true;
+    }
+
+    const currentToast = state?.mission?.toast ?? '';
+    if (currentToast !== lastToast) {
+      lastToast = currentToast;
+      toastElapsed = 0;
+    }
+    if (currentToast) {
+      toastElapsed += step;
+      if (toast) {
+        toast.textContent = currentToast;
+        toast.hidden = toastElapsed >= 3;
+      }
+      if (toastElapsed >= 3 && state?.mission?.toast === currentToast) {
+        state.mission.toast = '';
+        lastToast = '';
+      }
+    } else if (toast) {
+      toast.hidden = true;
+    }
+
+    setHidden('title-screen', state?.screen !== 'title');
+    setHidden('pause-screen', state?.screen !== 'paused');
+    setHidden('over-screen', state?.screen !== 'over');
+
+    frameCount += 1;
+    if (frameCount % 3 === 0) drawMinimap();
   }
 
-  function update() {
-    frame += 1;
-    if (healthFill) {
-      healthFill.style.width = `${THREE.MathUtils.clamp(state.player.health, 0, 100)}%`;
-    }
-    if (cashEl) cashEl.textContent = `$${Math.max(0, Math.floor(state.player.cash))}`;
-    starSpans.forEach((star, i) => star.classList.toggle('filled', i < state.wanted));
-    const velocity = state.currentVehicle?.speed ?? Math.hypot(state.player.vel.x, state.player.vel.z);
-    if (speedEl) {
-      speedEl.textContent = state.currentVehicle
-        ? `${Math.round(Math.abs(velocity) * 3.6)} km/h`
-        : 'On foot';
-    }
-    if (clockEl) clockEl.textContent = formatClock();
-    const hasMission = Boolean(state.mission?.id || state.mission?.title);
-    if (banner) banner.hidden = !hasMission;
-    if (bannerTitle) bannerTitle.textContent = state.mission?.title ?? '';
-    if (bannerObjective) bannerObjective.textContent = state.mission?.objective ?? '';
-    if (promptEl) {
-      const text = promptText();
-      promptEl.textContent = text;
-      promptEl.hidden = !text;
-    }
-    if (frame % 3 === 0) drawMinimap();
-  }
-
-  return {
-    update,
-    drawMinimap,
-    getWeaponState() { return null; },
-  };
+  return { update, setToast, showMessage };
 }
