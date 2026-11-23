@@ -274,8 +274,8 @@ function createRoadTexture(axis) {
     ctx.strokeStyle = 'rgba(225,211,168,0.42)';
     ctx.beginPath(); ctx.moveTo(0, 64); ctx.lineTo(canvas.width, 64); ctx.stroke();
     for (let x = 0; x < canvas.width; x += 102) {
-      ctx.fillStyle = 'rgba(168,166,150,0.26)';
-      for (let y = 8; y < 120; y += 13) ctx.fillRect(x, y, 6, 8);
+      ctx.fillStyle = 'rgba(168,166,150,0.13)';
+      for (let y = 8; y < 120; y += 13) ctx.fillRect(x, y, 5, 6);
     }
   } else {
     [35, 93].forEach((x) => { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); });
@@ -283,8 +283,8 @@ function createRoadTexture(axis) {
     ctx.strokeStyle = 'rgba(225,211,168,0.42)';
     ctx.beginPath(); ctx.moveTo(64, 0); ctx.lineTo(64, canvas.height); ctx.stroke();
     for (let y = 0; y < canvas.height; y += 102) {
-      ctx.fillStyle = 'rgba(168,166,150,0.26)';
-      for (let x = 8; x < 120; x += 13) ctx.fillRect(x, y, 8, 6);
+      ctx.fillStyle = 'rgba(168,166,150,0.13)';
+      for (let x = 8; x < 120; x += 13) ctx.fillRect(x, y, 6, 5);
     }
   }
   return makeCanvasTexture(canvas);
@@ -357,14 +357,14 @@ function makeSkyDome() {
   const geometry = new THREE.SphereGeometry(1150, 48, 32);
   const positions = geometry.attributes.position;
   const colors = [];
-  const horizon = new THREE.Color(0xeab180);
-  const zenith = new THREE.Color(0x8585b8);
+  const horizon = new THREE.Color(0xf2a96b);
+  const zenith = new THREE.Color(0x6f87c0);
   const lower = new THREE.Color(0xb97f6e);
 
   for (let i = 0; i < positions.count; i++) {
     const y = positions.getY(i) / 1150;
     const color = y >= 0
-      ? horizon.clone().lerp(zenith, THREE.MathUtils.smoothstep(y, 0, 1))
+      ? horizon.clone().lerp(zenith, THREE.MathUtils.smoothstep(y, 0.12, 1))
       : lower.clone().lerp(horizon, THREE.MathUtils.smoothstep(y, -0.35, 0));
     colors.push(color.r, color.g, color.b);
   }
@@ -374,6 +374,9 @@ function makeSkyDome() {
     vertexColors: true,
     side: THREE.BackSide,
     depthWrite: false,
+    // Never fog the sky itself: fogging the dome at ~1150 units muddied
+    // the gradient to flat brown-grey. Fog is for city geometry only.
+    fog: false,
   });
   const dome = new THREE.Mesh(geometry, material);
   dome.name = 'warm sunset sky dome';
@@ -430,8 +433,8 @@ export function buildCity(scene, world) {
   world.cityGroup = group;
   scene.add(group);
 
-  scene.background = new THREE.Color(0xeab180);
-  scene.fog = new THREE.Fog(0xecc79b, 400, 1400);
+  scene.background = new THREE.Color(0xf2a96b);
+  scene.fog = new THREE.Fog(0xf0c184, 520, 1700);
   group.add(makeSkyDome());
 
   scene.add(new THREE.HemisphereLight(0xf3d9ae, 0x8a6a4f, 1.25));

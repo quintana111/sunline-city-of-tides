@@ -620,6 +620,13 @@ export function createVehicleManager(scene, world, camera) {
     materializeVehicle(vehicle, scene);
     state.currentVehicle = vehicle;
     state.player.onFoot = false;
+    // The player is in the car now: keep the shared position on the
+    // vehicle (vehicles.update() re-syncs this every frame while driving,
+    // but entry itself must not leave a stale on-foot position behind).
+    state.player.pos.x = vehicle.pos.x;
+    state.player.pos.y = vehicle.pos.y ?? 0;
+    state.player.pos.z = vehicle.pos.z;
+    state.player.heading = vehicle.heading;
     state.player.vel.x = 0;
     state.player.vel.y = 0;
     state.player.vel.z = 0;

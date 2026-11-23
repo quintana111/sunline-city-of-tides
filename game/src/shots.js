@@ -23,7 +23,7 @@ function setGroupPosition(group, x, y, z) {
   if (group?.position?.set) group.position.set(x, y, z);
 }
 
-function setCarPosition(car, x, z, heading) {
+function setCarPosition(car, x, z, heading, state) {
   if (!car) return;
   if (car.pos && typeof car.pos === 'object') {
     car.pos.x = x;
@@ -35,6 +35,16 @@ function setCarPosition(car, x, z, heading) {
   car.heading = heading;
   setGroupPosition(car.group, x, 0, z);
   if (car.group?.rotation) car.group.rotation.y = -heading;
+  // Keep the shared player position on the car: in shot mode the sim is
+  // frozen, so vehicles.update() never runs its per-frame sync and
+  // state.player.pos would stay stale at (0,0) — the minimap arrow and
+  // anything reading the player position would point at the city centre.
+  if (state?.player?.pos) {
+    state.player.pos.x = x;
+    state.player.pos.y = 0;
+    state.player.pos.z = z;
+    state.player.heading = heading;
+  }
 }
 
 function setTrafficCar(entry, x, z, heading) {
@@ -134,12 +144,13 @@ export function applyShot(name, context) {
       state.screen = 'title';
       state.paused = false;
       state.wanted = 0;
-      // High view over the Glassline skyline with the beach road below.
-      // Also tried: south-west-facing (dark facades), beach-level (too
-      // much empty sky), north-looking-south (no coast visible through
-      // the haze) — this framing stays the best of the four.
-      camera.position.set(120, 55, 260);
-      camera.lookAt(0, 40, -40);
+      // From over the ocean looking north-west: teal water in the
+      // foreground, beach + palms + marina mid-frame, Glassline towers
+      // rising beyond — the coastal-city postcard. Tower tops clear the
+      // title card into the top strip; the coast reads at the frame edges
+      // and below the card.
+      camera.position.set(250, 60, 850);
+      camera.lookAt(-80, 62, -100);
       return true;
     }
 
@@ -149,7 +160,7 @@ export function applyShot(name, context) {
       const car = vehicles.createCar('sports', -80, 4.5, Math.PI / 2);
       vehicles.enterVehicle(car);
       car.speed = 14;
-      setCarPosition(car, -80, 4.5, Math.PI / 2);
+      setCarPosition(car, -80, 4.5, Math.PI / 2, state);
       const trafficCars = traffic?.cars || [];
       const spots = [
         [car.pos.x + 28, 4.5],
@@ -171,7 +182,7 @@ export function applyShot(name, context) {
       const car = vehicles.createCar('sports', playerX, 4.5, Math.PI / 2);
       vehicles.enterVehicle(car);
       car.speed = 16;
-      setCarPosition(car, playerX, 4.5, Math.PI / 2);
+      setCarPosition(car, playerX, 4.5, Math.PI / 2, state);
       police?.setWanted?.(3);
       state.wanted = 3;
 
@@ -198,9 +209,11 @@ export function applyShot(name, context) {
       // Chase view from behind, pulled back and offset to the south side so
       // the trailing north-lane cruiser stays well inside the frame; the
       // lookAt sits west of the player car so the car lands right-of-centre,
-      // clear of the centred "E — Exit vehicle" prompt.
-      camera.position.set(playerX - 16, 9, 18);
-      camera.lookAt(playerX - 4, 1.5, -1);
+      // clear of the centred "E — Exit vehicle" prompt. Closer and lower
+      // than the first pass so both cruisers and the player car read bigger
+      // and less foreground road sits empty.
+      camera.position.set(playerX - 14, 7.5, 16);
+      camera.lookAt(playerX - 2, 1.2, -1);
       finishPlayShot(state);
       return true;
     }
