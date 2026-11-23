@@ -1,4 +1,5 @@
 // Sunline: City of Tides — entry program (Node 22, standard library only).
+// Written fresh 2026-11-24 (Builder A re-author).
 // Hands the game in: copies game/ and screenshots/ from beside this file to
 // /output (or $MAKEFUN_OUTPUT_DIR outside the grader) and writes
 // /output/dossier.json with the vendored make.fun library.

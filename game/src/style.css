@@ -1,0 +1,157 @@
+:root {
+  color-scheme: dark;
+  --ink: #fff0d1;
+  --muted: #d2c1a5;
+  --panel: rgba(14, 25, 29, .88);
+  --line: rgba(255, 232, 190, .22);
+  --gold: #f4c56c;
+  --coral: #ef775e;
+}
+* { box-sizing: border-box; }
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #17272b;
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+#game {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  touch-action: none;
+}
+#hud { position: fixed; inset: 0; pointer-events: none; text-shadow: 0 2px 6px #111; }
+.hud-panel {
+  position: absolute;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(13, 25, 29, .72);
+  backdrop-filter: blur(7px);
+}
+#vitals { top: 18px; left: 18px; width: 190px; }
+#health-track { height: 8px; margin: 5px 0 9px; overflow: hidden; border-radius: 8px; background: #533d39; }
+#health-fill { width: 100%; height: 100%; background: linear-gradient(90deg, #e16d52, #f4c56c); transition: width .15s; }
+#cash { font-weight: 750; font-size: 17px; }
+#wanted-clock { top: 18px; right: 18px; display: flex; align-items: center; gap: 13px; }
+#stars { display: flex; gap: 3px; color: #675c4a; font-size: 20px; }
+#stars .filled { color: #ffd45d; }
+#clock { min-width: 45px; font-variant-numeric: tabular-nums; font-weight: 700; }
+#mission-banner {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  width: min(440px, calc(100vw - 36px));
+  padding: 12px 18px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 215, 151, .35);
+  border-radius: 10px;
+  background: rgba(19, 30, 32, .82);
+  text-align: center;
+}
+#mission-title { margin-bottom: 4px; color: var(--gold); font-weight: 750; }
+#mission-objective { color: var(--muted); font-size: 13px; line-height: 1.4; }
+#minimap {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  width: 180px;
+  height: 180px;
+  border: 1px solid rgba(255, 235, 195, .5);
+  border-radius: 10px;
+  background: #142329;
+  box-shadow: 0 5px 18px #0006;
+}
+#speed {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(13, 25, 29, .72);
+  font-size: 20px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+#prompt {
+  position: absolute;
+  top: 58%;
+  left: 50%;
+  padding: 10px 16px;
+  transform: translate(-50%, -50%);
+  border-radius: 8px;
+  background: rgba(13, 25, 29, .8);
+  color: var(--gold);
+  font-weight: 700;
+}
+[hidden] { display: none !important; }
+.overlay {
+  position: fixed;
+  z-index: 5;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: linear-gradient(135deg, rgba(16, 31, 34, .35), rgba(22, 22, 24, .68));
+}
+.card {
+  width: min(570px, 100%);
+  padding: clamp(25px, 6vw, 48px);
+  border: 1px solid rgba(255, 226, 182, .3);
+  border-radius: 17px;
+  background: var(--panel);
+  box-shadow: 0 24px 80px #0007;
+  text-align: center;
+  backdrop-filter: blur(12px);
+}
+.eyebrow {
+  margin: 0 0 10px;
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+}
+h1, h2 { margin: 0; line-height: 1.05; letter-spacing: -.035em; }
+h1 { font-size: clamp(34px, 7vw, 58px); }
+h2 { font-size: clamp(30px, 6vw, 46px); }
+.subtitle { margin: 12px 0 26px; color: var(--muted); font-size: 17px; }
+.instructions { margin: 20px 0 0; color: #d8c9af; font-size: 13px; line-height: 1.8; }
+button {
+  min-width: 130px;
+  margin: 5px;
+  padding: 11px 18px;
+  border: 1px solid rgba(255, 230, 187, .38);
+  border-radius: 7px;
+  background: #d88954;
+  color: #201b17;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+  pointer-events: auto;
+}
+button:hover { background: #f0b46d; }
+button.secondary { background: rgba(255, 239, 211, .12); color: var(--ink); }
+.button-row { margin-top: 8px; }
+#status {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+@media (max-width: 560px) {
+  #vitals { top: 10px; left: 10px; width: 150px; padding: 8px 10px; }
+  #wanted-clock { top: 10px; right: 10px; gap: 7px; padding: 8px 9px; }
+  #stars { font-size: 15px; }
+  #minimap { left: 10px; bottom: 10px; width: 142px; height: 142px; }
+  #speed { right: 10px; bottom: 12px; font-size: 16px; }
+  #mission-banner { top: 76px; }
+}

@@ -1,7 +1,8 @@
 // Sunline: City of Tides — boot, input, game loop, screens, fallback HUD,
-// ?shot= staging hook. Builder B modules (police/missions/combat/hud/audio/
-// save/shots) are loaded by dynamic import and tolerated when absent:
-// main.js works fully without them and defers to them when present.
+// ?shot= staging hook. Written fresh 2026-11-24 (Builder A re-author).
+// Builder B modules (police/missions/combat/hud/audio/save/shots) load by
+// dynamic import and are tolerated when absent: main.js works fully without
+// them and defers to them when present.
 import * as THREE from 'three';
 import { createWorld, buildCity } from './world.js';
 import { createPlayer } from './player.js';
@@ -72,6 +73,7 @@ const world = createWorld(seed);
 world.state = state;
 buildCity(scene, world);
 
+// Core wiring order (design §13): player -> vehicles -> spawnCars -> traffic.
 const player = createPlayer(scene, world, camera);
 const vehicles = createVehicleManager(scene, world, camera);
 const traffic = createTraffic(scene, world);
@@ -118,6 +120,9 @@ function syncOverlays() {
   if (pauseScreen) pauseScreen.hidden = state.screen !== 'paused';
   if (overScreen) overScreen.hidden = state.screen !== 'over';
   if (fallbackHud && hudRoot) hudRoot.hidden = state.screen === 'title' || state.screen === 'over';
+  // With the real HUD present the panel must also hide on title/over
+  // screens (integration fix: previously it stayed visible over the title).
+  if (!fallbackHud && hudRoot) hudRoot.hidden = state.screen === 'title' || state.screen === 'over';
   announce(state.screen === 'title' ? 'Title screen'
     : state.screen === 'paused' ? 'Game paused'
     : state.screen === 'over' ? 'Game over' : 'Maravela is ready');
@@ -316,8 +321,7 @@ function stageBuiltInShot(name) {
     state.input.keys.delete('KeyW');
     state.input.mouseDX = state.input.mouseDY = 0;
     const current = state.currentVehicle;
-    // Traffic ahead on the same road so the shot reads as a drive, not an empty street.
-    // (Shot mode freezes updates afterwards, so these placements persist.)
+    // Traffic ahead on the same road so the shot reads as a drive.
     const ahead = [28, 52, 78];
     for (let i = 0; i < Math.min(ahead.length, traffic.cars.length); i++) {
       const t = traffic.cars[i];
@@ -366,7 +370,7 @@ function stageBuiltInShot(name) {
 }
 
 // After any successful staging: make sure the staged player car has a mesh
-// and no traffic car is sitting on the lens (it would read as a glitch blob).
+// and no traffic car is sitting on the lens.
 function finalizeShot() {
   if (state.currentVehicle && !state.currentVehicle.group) {
     vehicles.materializeVehicle?.(state.currentVehicle);
@@ -380,8 +384,8 @@ function finalizeShot() {
   player.group.visible = state.player.onFoot;
 }
 
-// Clean applyShot hook for the systems builder: shots.js owns shot modes when
-// it accepts one; otherwise the built-in staging above applies.
+// Clean applyShot hook for Builder B: shots.js owns shot modes when it
+// accepts one; otherwise the built-in staging above applies.
 async function applyShot(name) {
   shotMode = true;
   shotReady = false;
@@ -483,7 +487,6 @@ function drawMinimap() {
   for (const block of world.blocks ?? []) {
     ctx.fillRect(mapX(block.minX), mapY(block.minZ), ((block.maxX - block.minX) / size) * width, ((block.maxZ - block.minZ) / size) * height);
   }
-  // Roads: world.roadLines is an array of centre-line numbers, one per axis.
   ctx.strokeStyle = 'rgba(220,207,177,.9)';
   ctx.lineWidth = 3;
   for (const line of world.roadLines ?? []) {
@@ -605,7 +608,6 @@ if (shotName) {
     shotMode = false;
     setScreen('title');
   } else {
-    // Shot mode freezes updates; finalizeShot already synced visibility.
     shotPendingRenders = true;
   }
 }

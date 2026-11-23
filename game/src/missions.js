@@ -1,269 +1,259 @@
-// Deterministic mission flow and staged objective beacons for Sunline: City of Tides.
+// Missions (design §9). Written fresh 2026-11-24 (Builder B).
+// One active mission at a time; E to start at a marker, timers, cash
+// rewards, retry/abandon on failure. Markers use world.missionPoints.
 import * as THREE from 'three';
 
+const MISSIONS = [
+  {
+    id: 'first-light',
+    title: 'First Light Run',
+    startKey: 'parcelPickup',
+    destKey: 'cafeDropoff',
+    time: 240,
+    reward: 300,
+    pickupLabel: 'Pick up the sealed parcel',
+    deliverLabel: 'Deliver the parcel to Café Lumen on Sunwash Beach',
+  },
+  {
+    id: 'harbour-receipt',
+    title: 'Harbour Receipt',
+    startKey: 'marinaCrate',
+    destKey: 'workshopDropoff',
+    time: 300,
+    reward: 400,
+    pickupLabel: 'Collect the numbered crate at Pelican Marina',
+    deliverLabel: 'Drop the crate at the Foundry Quay workshop',
+  },
+  {
+    id: 'wrong-turn',
+    title: 'Wrong Turn, Right Friend',
+    startKey: 'mechanicPickup',
+    destKey: 'safehouse',
+    time: 300,
+    reward: 450,
+    pickupLabel: 'Pick up the stranded mechanic near Civic Crescent',
+    deliverLabel: 'Get the mechanic to the Palm Court safehouse',
+    onStart: (police) => police?.setWanted?.(1),
+  },
+  {
+    id: 'last-ferry',
+    title: 'Last Ferry Window',
+    startKey: 'cafeDropoff',
+    destKey: 'ferryDock',
+    time: 240,
+    reward: 500,
+    pickupLabel: 'Meet the contact at Café Lumen',
+    deliverLabel: 'Bring the contact to the marina before the last ferry',
+  },
+];
+
+function beaconMaterial(color, emissive) {
+  return new THREE.MeshStandardMaterial({ color, emissive, emissiveIntensity: 1.1, roughness: 0.38 });
+}
+
 export function createMissions(scene, world, state, vehicleManager, police) {
-  let beacon = null;
-  let missionClearT = 0;
-  let bobClock = 0;
-  let previousE = false;
-  let activeDefinition = null;
+  const points = world.missionPoints ?? {};
+  let active = null; // { def, stage, timeLeft, target }
+  let wasEPressed = false;
+  let message = '';
+  let messageTimer = 0;
 
-  const definitions = {
-    'first-light': {
-      title: 'First Light Run',
-      pickup: 'parcelPickup',
-      dropoff: 'cafeDropoff',
-      time: 150,
-      reward: 350,
-      startText: 'A sealed parcel needs a quick ride. Café Lumen is waiting.',
-      pickupText: 'Good. Take it to Café Lumen, and keep it safe.',
-      completeText: 'Delivered. You made that look easy.',
-    },
-    'harbour-receipt': {
-      title: 'Harbour Receipt',
-      pickup: 'marinaCrate',
-      dropoff: 'workshopDropoff',
-      time: 240,
-      reward: 500,
-      startText: 'There is a crate by the marina. Bring it to the workshop.',
-      pickupText: 'Crate secured. The workshop is ready for you.',
-      completeText: 'Delivered. That is one less thing to worry about.',
-    },
-    'wrong-turn': {
-      title: 'Wrong Turn, Right Friend',
-      pickup: 'mechanicPickup',
-      dropoff: 'safehouse',
-      time: 240,
-      reward: 600,
-      wantedOnStart: true,
-      startText: 'A mechanic is stranded. I will keep an eye out for you.',
-      pickupText: 'They are aboard. Head for the safehouse.',
-      completeText: 'You got them home. Thank you for looking out.',
-    },
-    'last-ferry': {
-      title: 'Last Ferry Window',
-      pickup: null,
-      dropoff: 'ferryDock',
-      time: 200,
-      reward: 800,
-      startText: 'Our contact is with you now. Get to the ferry before it leaves.',
-      pickupText: 'The contact is ready. Make for the ferry dock.',
-      completeText: 'You made the crossing. We owe you one.',
-    },
-  };
+  // Tall gold beacon at the current objective; small markers at starts.
+  const beacon = new THREE.Group();
+  const beaconPole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.22, 0.35, 2.6, 12),
+    beaconMaterial(0xffc341, 0xffa21a),
+  );
+  beaconPole.position.set(0.9, 1.3, -0.9);
+  const beaconCone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.7, 1.1, 4),
+    new THREE.MeshStandardMaterial({ color: 0xffd15a, emissive: 0x9f5e0c, emissiveIntensity: 0.8 }),
+  );
+  beaconCone.position.set(0.9, 3.2, -0.9);
+  beacon.add(beaconPole, beaconCone);
+  // A sealed parcel / crate at the marker base, front and centre, so the
+  // objective reads as a pickup — sized to the character (waist-high),
+  // with the thin pole offset behind it.
+  const parcel = new THREE.Mesh(
+    new THREE.BoxGeometry(1.6, 1.2, 1.3),
+    new THREE.MeshStandardMaterial({ color: 0xc98f3d, roughness: 0.8 }),
+  );
+  parcel.position.y = 0.6;
+  const parcelTape = new THREE.Mesh(
+    new THREE.BoxGeometry(1.64, 1.22, 0.35),
+    new THREE.MeshStandardMaterial({ color: 0x8a5a1a, roughness: 0.8 }),
+  );
+  parcelTape.position.y = 0.6;
+  const parcelTape2 = new THREE.Mesh(
+    new THREE.BoxGeometry(0.35, 1.22, 1.34),
+    new THREE.MeshStandardMaterial({ color: 0x8a5a1a, roughness: 0.8 }),
+  );
+  parcelTape2.position.y = 0.6;
+  beacon.add(parcel, parcelTape, parcelTape2);
+  beacon.visible = false;
+  scene.add(beacon);
 
-  function pointInsideBuilding(x, z) {
-    for (const b of world?.buildings || []) {
-      if (Math.abs(x - b.x) <= (b.w || 0) * 0.5 &&
-          Math.abs(z - b.z) <= (b.d || 0) * 0.5) return true;
-    }
-    return false;
+  const startMarkers = [];
+  for (const def of MISSIONS) {
+    const p = points[def.startKey];
+    if (!p) continue;
+    const marker = new THREE.Mesh(
+      new THREE.ConeGeometry(0.9, 1.6, 4),
+      new THREE.MeshStandardMaterial({ color: 0xffd15a, emissive: 0x8a5a00, emissiveIntensity: 0.7 }),
+    );
+    marker.position.set(p.x, 3.4, p.z);
+    marker.rotation.x = Math.PI;
+    scene.add(marker);
+    startMarkers.push(marker);
   }
 
-  function pointLabel(key) {
-    return world?.missionPoints?.[key]?.label || key || '';
+  function playerPos() {
+    return state.currentVehicle?.pos ?? state.player.pos;
   }
 
-  function resolvePoint(key, fallbackIndex = 0) {
-    const source = key ? world?.missionPoints?.[key] : null;
-    let p = source && Number.isFinite(source.x) && Number.isFinite(source.z)
-      ? { x: source.x, z: source.z }
-      : { x: fallbackIndex * 18, z: 0 };
-
-    if (!pointInsideBuilding(p.x, p.z)) return p;
-    for (let i = 1; i <= 16; i++) {
-      const angle = (fallbackIndex + i) * Math.PI / 8;
-      const candidate = {
-        x: p.x + Math.sin(angle) * (12 + (i % 4) * 3),
-        z: p.z - Math.cos(angle) * (12 + (i % 4) * 3),
-      };
-      if (!pointInsideBuilding(candidate.x, candidate.z)) return candidate;
-    }
-    return { x: fallbackIndex * 24, z: 24 };
+  function setMissionState(id, title, objective, stage) {
+    state.mission = { id, title, objective, stage };
   }
 
-  function playerPosition() {
-    const p = state.currentVehicle?.pos || state.player?.pos || { x: 0, z: 0 };
-    return { x: Number(p.x) || 0, z: Number(p.z) || 0 };
-  }
-
-  function removeBeacon() {
-    if (beacon && scene) scene.remove(beacon);
-    beacon = null;
-  }
-
-  function moveBeacon(target) {
-    if (!target || !scene) return;
-    if (!beacon) {
-      beacon = new THREE.Group();
-      beacon.name = 'missionBeacon';
-
-      const gold = new THREE.MeshStandardMaterial({
-        color: 0xffc341,
-        emissive: 0xffa21a,
-        emissiveIntensity: 1.1,
-        roughness: 0.38,
-      });
-      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.5, 2.4, 12), gold);
-      shaft.position.y = 1.2;
-      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.75, 1.15, 4), gold);
-      tip.position.y = 2.95;
-      beacon.add(shaft, tip);
-      scene.add(beacon);
-    }
-    beacon.position.set(target.x, 0, target.z);
-  }
-
-  function markerFor(mission) {
-    return mission.target ? { x: mission.target.x, z: mission.target.z } : null;
-  }
-
-  function setTarget(mission, point) {
-    mission.target = { x: point.x, z: point.z };
-    mission.marker = markerFor(mission);
-    moveBeacon(mission.target);
-  }
-
-  function resetMission() {
-    removeBeacon();
-    missionClearT = 0;
-    activeDefinition = null;
-    state.mission = { id: null, title: '', objective: '', stage: 0 };
+  function moveBeaconTo(point) {
+    if (!point) { beacon.visible = false; return; }
+    beacon.position.set(point.x, 0, point.z);
+    beacon.visible = true;
   }
 
   function startMission(id) {
-    const def = definitions[id];
+    const def = MISSIONS.find((m) => m.id === id);
     if (!def) return false;
-    if (state.mission?.stage > 0 && state.mission?.stage < 3) resetMission();
-    else removeBeacon();
-
-    activeDefinition = def;
-    missionClearT = 0;
-    bobClock = 0;
-
-    const pickup = id === 'last-ferry'
-      ? (() => {
-          const p = playerPosition();
-          const h = state.currentVehicle?.heading ?? state.player?.heading ?? 0;
-          return { x: p.x + Math.sin(h) * 3, z: p.z - Math.cos(h) * 3 };
-        })()
-      : resolvePoint(def.pickup, Object.keys(definitions).indexOf(id) + 1);
-    const dropoff = resolvePoint(def.dropoff, Object.keys(definitions).indexOf(id) + 5);
-
-    const mission = {
-      id,
-      title: def.title,
-      objective: id === 'last-ferry'
-        ? `Reach ${pointLabel(def.dropoff)} before the ferry leaves`
-        : `Pick up the parcel — ${pointLabel(def.pickup)}`,
-      stage: 1,
-      timeLeft: def.time,
-      message: { speaker: 'Mara', text: def.startText },
-      marker: null,
-      toast: null,
-      reward: def.reward,
-      target: null,
-      pickup,
-      dropoff,
-      failed: false,
-    };
-    state.mission = mission;
-    setTarget(mission, pickup);
-    if (def.wantedOnStart) police?.setWanted?.(1);
+    const start = points[def.startKey];
+    const dest = points[def.destKey];
+    if (!start || !dest) return false;
+    active = { def, stage: 0, timeLeft: def.time, target: start };
+    setMissionState(def.id, def.title, def.pickupLabel, 0);
+    moveBeaconTo(start);
+    message = `${def.title} started — ${def.pickupLabel}`;
+    messageTimer = 4;
+    try { def.onStart?.(police); } catch { /* mission flavour only */ }
     return true;
   }
 
-  function failMission(mission) {
-    mission.failed = true;
-    mission.objective = 'Failed — press E at the marker to retry';
-    mission.message = {
-      speaker: 'Mara',
-      text: 'Too slow — the window closed. Come back when you are ready.',
-    };
-    mission.toast = null;
+  function completeMission() {
+    if (!active) return;
+    state.player.cash = Math.max(0, (state.player.cash || 0) + active.def.reward);
+    message = `${active.def.title} complete — +$${active.def.reward}`;
+    messageTimer = 5;
+    // Clear the mission id so a new job can start; keep the Done banner.
+    setMissionState(null, active.def.title, `Done — +$${active.def.reward}`, 2);
+    active = null;
+    moveBeaconTo(null);
   }
 
-  function completeMission(mission) {
-    const def = activeDefinition;
-    state.player.cash = (Number(state.player.cash) || 0) + (def?.reward || 0);
-    mission.objective = 'Complete!';
-    mission.stage = 3;
-    mission.timeLeft = 0;
-    mission.failed = false;
-    mission.message = {
-      speaker: 'Mara',
-      text: def?.completeText || 'Delivered. You did good.',
+  function failMission(reason) {
+    if (!active) return;
+    const def = active.def;
+    message = `${def.title} failed — ${reason}. Return to the marker to retry.`;
+    messageTimer = 6;
+    setMissionState(def.id, def.title, 'Failed — press E at the marker to retry', -1);
+    active = null;
+    moveBeaconTo(null);
+  }
+
+  function resetMission() {
+    active = null;
+    message = '';
+    messageTimer = 0;
+    setMissionState(null, '', '', 0);
+    moveBeaconTo(null);
+  }
+
+  function abandonMission() {
+    if (!active && state.mission?.stage !== -1) return false;
+    resetMission();
+    message = 'Mission abandoned.';
+    messageTimer = 3;
+    return true;
+  }
+
+  function getMissionState() {
+    return {
+      id: state.mission?.id ?? null,
+      title: state.mission?.title ?? '',
+      objective: state.mission?.objective ?? '',
+      stage: state.mission?.stage ?? 0,
+      timeLeft: active ? Math.max(0, Math.ceil(active.timeLeft)) : null,
+      reward: active?.def.reward ?? null,
+      message,
+      active: Boolean(active),
     };
-    mission.marker = null;
-    mission.target = null;
-    removeBeacon();
-    missionClearT = 4;
   }
 
   function update(dt, input) {
     if (!Number.isFinite(dt) || dt <= 0) return;
-    dt = Math.min(dt, 0.1);
-    bobClock += dt;
+    if (messageTimer > 0) messageTimer = Math.max(0, messageTimer - dt);
+    if (state.paused || state.screen !== 'play') return;
+    const keys = input?.keys ?? new Set();
+    const ePressed = keys.has('KeyE');
+    const eJust = ePressed && !wasEPressed;
+    wasEPressed = ePressed;
 
-    const keys = input?.keys || state.input?.keys;
-    const eDown = !!keys?.has?.('KeyE');
-    const ePressed = eDown && !previousE;
-    previousE = eDown;
-
-    const mission = state.mission;
-    if (!mission || !mission.stage) return;
-
-    if (mission.stage === 3) {
-      missionClearT -= dt;
-      if (missionClearT <= 0) resetMission();
-      return;
+    // Animate the beacon cone (bob + slow spin) while visible.
+    if (beacon.visible) {
+      beaconCone.position.y = 3.2 + Math.sin(performance.now() * 0.002) * 0.25;
+      beacon.rotation.y += dt * 0.8;
     }
 
-    if (mission.failed) {
-      if (ePressed && mission.target &&
-          Math.hypot(playerPosition().x - mission.target.x, playerPosition().z - mission.target.z) <= 8) {
-        startMission(mission.id);
+    const pos = playerPos();
+
+    if (active) {
+      active.timeLeft -= dt;
+      const target = active.target;
+      const dist = Math.hypot(pos.x - target.x, pos.z - target.z);
+      if (active.timeLeft <= 0) {
+        failMission('time ran out');
+        return;
+      }
+      if (dist < 7) {
+        if (active.stage === 0) {
+          active.stage = 1;
+          active.target = points[active.def.destKey];
+          setMissionState(active.def.id, active.def.title, active.def.deliverLabel, 1);
+          moveBeaconTo(active.target);
+          message = active.def.deliverLabel;
+          messageTimer = 4;
+        } else {
+          completeMission();
+        }
       }
       return;
     }
 
-    mission.timeLeft = Math.max(0, mission.timeLeft - dt);
-    if (mission.timeLeft <= 0) {
-      failMission(mission);
+    // No active mission: E near a start marker starts it; E on a failed
+    // mission retries it. Q abandons a failed mission entry.
+    if (state.mission?.stage === -1 && keys.has('KeyQ')) {
+      abandonMission();
       return;
     }
-
-    if (mission.target && beacon) {
-      beacon.position.y = 0.3 + 0.35 * Math.sin(bobClock * 2);
-    }
-
-    const p = playerPosition();
-    if (!mission.target || Math.hypot(p.x - mission.target.x, p.z - mission.target.z) > 6) return;
-
-    if (mission.stage === 1) {
-      mission.stage = 2;
-      const def = activeDefinition;
-      mission.objective = `Deliver to ${pointLabel(def?.dropoff)}`;
-      mission.message = { speaker: 'Mara', text: def?.pickupText || 'Good. Take it to the destination.' };
-      setTarget(mission, mission.dropoff);
-    } else {
-      completeMission(mission);
+    if (!eJust || !state.player.onFoot) return;
+    for (const def of MISSIONS) {
+      const start = points[def.startKey];
+      if (!start) continue;
+      const failedHere = state.mission?.stage === -1 && state.mission?.id === def.id;
+      const freeHere = !state.mission?.id;
+      if (!failedHere && !freeHere) continue;
+      if (Math.hypot(pos.x - start.x, pos.z - start.z) < 8) {
+        startMission(def.id);
+        return;
+      }
     }
   }
 
-  function getMissionState() {
-    const m = state.mission;
-    if (!m) return { id: null, title: '', objective: '', stage: 0, timeLeft: 0, target: null, reward: 0 };
-    return {
-      id: m.id || null,
-      title: m.title || '',
-      objective: m.objective || '',
-      stage: m.stage || 0,
-      timeLeft: m.timeLeft || 0,
-      target: m.target ? { x: m.target.x, z: m.target.z } : null,
-      reward: m.reward || 0,
-    };
-  }
-
-  return { update, startMission, resetMission, getMissionState };
+  return {
+    update,
+    startMission,
+    resetMission,
+    abandonMission,
+    getMissionState,
+    get active() { return active; },
+    get message() { return message; },
+    missions: MISSIONS.map((m) => ({ id: m.id, title: m.title, reward: m.reward, time: m.time })),
+  };
 }

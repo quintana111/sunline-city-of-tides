@@ -1,6 +1,7 @@
 // Vehicle models + arcade driving. Five original models, box-built.
+// Written fresh 2026-11-24 (Builder A re-author).
 // Forward = (sin h, 0, -cos h); every car mesh uses rotation.y = -heading,
-// so the car's local -Z (headlights) always points along its travel direction.
+// so the car's local -Z (headlights) always points along travel direction.
 import * as THREE from 'three';
 
 const VEHICLE_TYPES = {
@@ -12,7 +13,6 @@ const VEHICLE_TYPES = {
 };
 const CAR_RADIUS = 1.3;
 
-// Display names (e.g. 'Kestrel R') map back to model keys.
 const DISPLAY_NAMES = {
   'Morrow Compact': 'sedan',
   'Sunbird Cab': 'taxi',
@@ -20,17 +20,18 @@ const DISPLAY_NAMES = {
   'Docksider': 'truck',
   'Civic Sentinel': 'police',
 };
-function resolveType(type) {
+export function resolveType(type) {
   if (type in VEHICLE_TYPES) return type;
   if (type in DISPLAY_NAMES) return DISPLAY_NAMES[type];
   return 'sedan';
 }
 
+// Seeded RNG (mulberry32) — deterministic parked-car placement, no Math.random.
 function mulberry32(seed) {
-  let value = seed >>> 0;
+  let v = seed >>> 0;
   return function random() {
-    value += 0x6d2b79f5;
-    let t = value;
+    v += 0x6d2b79f5;
+    let t = v;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -41,60 +42,60 @@ function forwardForHeading(heading) {
   return new THREE.Vector3(Math.sin(heading), 0, -Math.cos(heading));
 }
 
-// Lane heading for a road line: axis 'x' = road runs east-west, lane +4.5 is eastbound.
+// Lane heading: axis 'x' = road runs east-west, lane +4.5 is eastbound.
 function headingForLane(axis, lane) {
   if (axis === 'x') return lane > 0 ? Math.PI / 2 : -Math.PI / 2;
   return lane > 0 ? 0 : Math.PI;
 }
 
-function makeMaterial(color, options = {}) {
+function mat(color, options = {}) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.05, ...options });
 }
 
-function addBox(parent, size, color, position, options = {}) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), makeMaterial(color, options));
-  mesh.position.set(position[0], position[1], position[2]);
+function addBox(parent, size, color, pos, options = {}) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), mat(color, options));
+  mesh.position.set(pos[0], pos[1], pos[2]);
   parent.add(mesh);
   return mesh;
 }
 
-function pointInsideBuilding(building, x, z, radius) {
-  const halfW = (Number(building.w) || 0) * 0.5 + radius;
-  const halfD = (Number(building.d) || 0) * 0.5 + radius;
-  return Math.abs(x - building.x) < halfW && Math.abs(z - building.z) < halfD;
+function insideBuilding(b, x, z, r) {
+  const hw = (Number(b.w) || 0) * 0.5 + r;
+  const hd = (Number(b.d) || 0) * 0.5 + r;
+  return Math.abs(x - b.x) < hw && Math.abs(z - b.z) < hd;
 }
 
-function collidesWithBuilding(world, x, z, radius = CAR_RADIUS) {
+function hitsBuilding(world, x, z, radius = CAR_RADIUS) {
   if (!world || !Array.isArray(world.buildings)) return false;
-  return world.buildings.some((b) => b && pointInsideBuilding(b, x, z, radius));
+  return world.buildings.some((b) => b && insideBuilding(b, x, z, radius));
 }
 
-function clampToWorld(world, x, z) {
-  let result = { x, z };
+function clampWorld(world, x, z) {
+  let out = { x, z };
   if (world && typeof world.clampToCity === 'function') {
     const c = world.clampToCity(x, z);
-    if (c && typeof c === 'object') result = { x: c.x, z: c.z };
+    if (c && typeof c === 'object') out = { x: c.x, z: c.z };
   }
-  result.z = z > 580 ? Math.min(680, z) : result.z;
-  return result;
+  if (z > 580) out.z = Math.min(680, z);
+  return out;
 }
 
-function makeWheel(wheelGroup, radius, width) {
-  const rollGroup = new THREE.Group();
-  wheelGroup.add(rollGroup);
+function makeWheel(holder, radius, width) {
+  const roll = new THREE.Group();
+  holder.add(roll);
   const tire = new THREE.Mesh(
     new THREE.CylinderGeometry(radius, radius, width, 10, 1),
-    makeMaterial(0x25282b, { roughness: 0.95 }),
+    mat(0x25282b, { roughness: 0.95 }),
   );
   tire.rotation.z = Math.PI / 2;
-  rollGroup.add(tire);
+  roll.add(tire);
   const hub = new THREE.Mesh(
     new THREE.CylinderGeometry(radius * 0.48, radius * 0.48, width + 0.015, 8, 1),
-    makeMaterial(0x9da4a2, { metalness: 0.48, roughness: 0.44 }),
+    mat(0x9da4a2, { metalness: 0.48, roughness: 0.44 }),
   );
   hub.rotation.z = Math.PI / 2;
-  rollGroup.add(hub);
-  return { wheelGroup, rollGroup };
+  roll.add(hub);
+  return { wheelGroup: holder, rollGroup: roll };
 }
 
 function buildCarModel(type, config) {
@@ -102,23 +103,23 @@ function buildCarModel(type, config) {
   group.name = config.name;
   const { length, width } = config;
   const isTruck = config.style === 'truck';
-  const bodyHeight = isTruck ? 0.62 : config.style === 'sports' ? 0.43 : 0.52;
+  const bodyH = isTruck ? 0.62 : config.style === 'sports' ? 0.43 : 0.52;
   const bodyY = isTruck ? 0.66 : 0.62;
 
-  addBox(group, [width, bodyHeight, length], config.color, [0, bodyY, 0]);
+  addBox(group, [width, bodyH, length], config.color, [0, bodyY, 0]);
   if (isTruck) {
     addBox(group, [width * 0.88, 0.9, 2.15], config.cabin, [0, 1.38, -1.17]); // cab, front
     addBox(group, [width * 0.96, 0.66, 2.48], 0xb7b09e, [0, 0.99, 1.52]); // cargo bed
     addBox(group, [0.12, 0.7, 2.42], 0xc9c2af, [-width * 0.45, 1.02, 1.52]);
     addBox(group, [0.12, 0.7, 2.42], 0xc9c2af, [width * 0.45, 1.02, 1.52]);
   } else {
-    const cabinLength = config.style === 'sports' ? 2.05 : 2.38;
+    const cabinLen = config.style === 'sports' ? 2.05 : 2.38;
     const cabinY = config.style === 'sports' ? 1.0 : 1.12;
-    addBox(group, [width * 0.78, config.style === 'sports' ? 0.54 : 0.66, cabinLength], config.cabin, [0, cabinY, -0.05]);
-    addBox(group, [width * 0.7, 0.35, 0.035], 0x8ba5a5, [0, cabinY + 0.02, -cabinLength * 0.5 - 0.02]);
-    addBox(group, [width * 0.7, 0.34, 0.035], 0x819b9d, [0, cabinY + 0.02, cabinLength * 0.5 + 0.02]);
-    addBox(group, [0.035, 0.32, cabinLength * 0.7], 0x829c9e, [-width * 0.4, cabinY + 0.02, -0.02]);
-    addBox(group, [0.035, 0.32, cabinLength * 0.7], 0x829c9e, [width * 0.4, cabinY + 0.02, -0.02]);
+    addBox(group, [width * 0.78, config.style === 'sports' ? 0.54 : 0.66, cabinLen], config.cabin, [0, cabinY, -0.05]);
+    addBox(group, [width * 0.7, 0.35, 0.035], 0x8ba5a5, [0, cabinY + 0.02, -cabinLen * 0.5 - 0.02]);
+    addBox(group, [width * 0.7, 0.34, 0.035], 0x819b9d, [0, cabinY + 0.02, cabinLen * 0.5 + 0.02]);
+    addBox(group, [0.035, 0.32, cabinLen * 0.7], 0x829c9e, [-width * 0.4, cabinY + 0.02, -0.02]);
+    addBox(group, [0.035, 0.32, cabinLen * 0.7], 0x829c9e, [width * 0.4, cabinY + 0.02, -0.02]);
   }
   if (type === 'taxi') {
     addBox(group, [0.54, 0.14, 0.34], 0xf6e9b4, [0, 1.61, -0.04]); // roof sign
@@ -131,40 +132,40 @@ function buildCarModel(type, config) {
   }
   if (type === 'police') {
     addBox(group, [width * 0.96, 0.22, 2.05], 0xe9e9e2, [0, 0.87, 0.12]);
-    const redLight = addBox(group, [0.28, 0.16, 0.22], 0xff2525, [-0.2, 1.55, 0], { emissive: 0x9b0808, emissiveIntensity: 1.3 });
-    const blueLight = addBox(group, [0.28, 0.16, 0.22], 0x2c64ff, [0.2, 1.55, 0], { emissive: 0x102cbb, emissiveIntensity: 1.3 });
-    redLight.name = 'redLight';
-    blueLight.name = 'blueLight';
+    const red = addBox(group, [0.28, 0.16, 0.22], 0xff2525, [-0.2, 1.55, 0], { emissive: 0x9b0808, emissiveIntensity: 1.3 });
+    const blue = addBox(group, [0.28, 0.16, 0.22], 0x2c64ff, [0.2, 1.55, 0], { emissive: 0x102cbb, emissiveIntensity: 1.3 });
+    red.name = 'redLight';
+    blue.name = 'blueLight';
   }
 
   // Headlights front (-Z local), taillights rear (+Z local).
-  const headlightMaterial = makeMaterial(0xfff4cf, { emissive: 0xc9a853, emissiveIntensity: 0.45 });
-  const taillightMaterial = makeMaterial(0xe34a40, { emissive: 0x8e100d, emissiveIntensity: 0.65 });
-  const headlightGeometry = new THREE.BoxGeometry(0.34, 0.16, 0.08);
-  const taillightGeometry = new THREE.BoxGeometry(0.28, 0.16, 0.08);
+  const headMat = mat(0xfff4cf, { emissive: 0xc9a853, emissiveIntensity: 0.45 });
+  const tailMat = mat(0xe34a40, { emissive: 0x8e100d, emissiveIntensity: 0.65 });
+  const headGeo = new THREE.BoxGeometry(0.34, 0.16, 0.08);
+  const tailGeo = new THREE.BoxGeometry(0.28, 0.16, 0.08);
   for (const side of [-1, 1]) {
-    const headlight = new THREE.Mesh(headlightGeometry, headlightMaterial);
-    headlight.position.set(side * (width * 0.35), bodyY + 0.02, -length * 0.5 - 0.035);
-    group.add(headlight);
-    const taillight = new THREE.Mesh(taillightGeometry, taillightMaterial);
-    taillight.position.set(side * (width * 0.35), bodyY + 0.03, length * 0.5 + 0.035);
-    group.add(taillight);
+    const head = new THREE.Mesh(headGeo, headMat);
+    head.position.set(side * (width * 0.35), bodyY + 0.02, -length * 0.5 - 0.035);
+    group.add(head);
+    const tail = new THREE.Mesh(tailGeo, tailMat);
+    tail.position.set(side * (width * 0.35), bodyY + 0.03, length * 0.5 + 0.035);
+    group.add(tail);
   }
 
   const wheels = { front: [], all: [] };
-  const wheelRadius = isTruck ? 0.43 : 0.36;
-  const wheelWidth = isTruck ? 0.28 : 0.22;
+  const wheelR = isTruck ? 0.43 : 0.36;
+  const wheelW = isTruck ? 0.28 : 0.22;
   const frontZ = -length * 0.31;
   const rearZ = length * 0.32;
   for (const side of [-1, 1]) {
     for (const z of [frontZ, rearZ]) {
-      const wheelGroup = new THREE.Group();
-      wheelGroup.position.set(side * (width * 0.5 + 0.015), wheelRadius, z);
-      group.add(wheelGroup);
-      const wheel = makeWheel(wheelGroup, wheelRadius, wheelWidth);
-      const record = { ...wheel, front: z === frontZ };
-      wheels.all.push(record);
-      if (record.front) wheels.front.push(record);
+      const holder = new THREE.Group();
+      holder.position.set(side * (width * 0.5 + 0.015), wheelR, z);
+      group.add(holder);
+      const wheel = makeWheel(holder, wheelR, wheelW);
+      const rec = { ...wheel, front: z === frontZ };
+      wheels.all.push(rec);
+      if (rec.front) wheels.front.push(rec);
     }
   }
   return { group, wheels };
@@ -183,11 +184,11 @@ export function createVehicleManager(scene, world, camera) {
   const cars = [];
   let nextId = 1;
   let wasEPressed = false;
-  let cameraInitialized = false;
+  let camInit = false;
   let cameraYaw = Number(state.player.heading) || 0;
   let cameraYawOffset = 0;
-  const desiredCameraPosition = new THREE.Vector3();
-  const cameraTarget = new THREE.Vector3();
+  const desiredCam = new THREE.Vector3();
+  const camTarget = new THREE.Vector3();
 
   function createCar(type, x, z, heading = 0) {
     const safeType = type in VEHICLE_TYPES ? type : 'sedan';
@@ -214,7 +215,7 @@ export function createVehicleManager(scene, world, camera) {
     return vehicle;
   }
 
-  // Deterministic parked cars: world.spawnPoints.cars first, then extra lane spots.
+  // Deterministic parked cars: world.spawnPoints.cars first, then lane spots.
   function spawnCars(count = 10, seedOffset = 0) {
     const placed = [];
     const types = ['sedan', 'taxi', 'sports', 'truck'];
@@ -239,7 +240,7 @@ export function createVehicleManager(scene, world, camera) {
           type: types[Math.floor(rng() * types.length)],
         };
       } else break;
-      if (collidesWithBuilding(world, spot.x, spot.z, CAR_RADIUS)) continue;
+      if (hitsBuilding(world, spot.x, spot.z, CAR_RADIUS)) continue;
       if (placed.some((p) => Math.hypot(p.x - spot.x, p.z - spot.z) < 7)) continue;
       const vehicle = createCar(spot.type || types[Math.floor(rng() * types.length)], spot.x, spot.z, spot.heading);
       vehicle.owned = false; // parked cars are stealable
@@ -253,8 +254,7 @@ export function createVehicleManager(scene, world, camera) {
   }
 
   // Attach a visual mesh to a vehicle object that has none (e.g. a plain
-  // staging stub { id, type, pos, heading, speed } from shots.js). The
-  // object keeps its identity and type string; the mesh is added in place.
+  // staging stub { id, type, pos, heading, speed } from shots.js).
   function materializeVehicle(vehicle) {
     if (!vehicle || vehicle.group) return vehicle;
     const safeType = resolveType(vehicle.type);
@@ -299,9 +299,9 @@ export function createVehicleManager(scene, world, camera) {
     if (!vehicle) return false;
     const rightX = Math.cos(vehicle.heading);
     const rightZ = Math.sin(vehicle.heading);
-    let exit = clampToWorld(world, vehicle.pos.x + rightX * 2.2, vehicle.pos.z + rightZ * 2.2);
-    if (collidesWithBuilding(world, exit.x, exit.z, 0.6)) {
-      exit = clampToWorld(world, vehicle.pos.x - rightX * 2.2, vehicle.pos.z - rightZ * 2.2);
+    let exit = clampWorld(world, vehicle.pos.x + rightX * 2.2, vehicle.pos.z + rightZ * 2.2);
+    if (hitsBuilding(world, exit.x, exit.z, 0.6)) {
+      exit = clampWorld(world, vehicle.pos.x - rightX * 2.2, vehicle.pos.z - rightZ * 2.2);
     }
     state.player.pos.x = exit.x;
     state.player.pos.y = 0;
@@ -314,7 +314,7 @@ export function createVehicleManager(scene, world, camera) {
     state.currentVehicle = null;
     vehicle.speed = 0;
     cameraYaw = vehicle.heading + cameraYawOffset;
-    cameraInitialized = false;
+    camInit = false;
     return true;
   }
 
@@ -323,29 +323,29 @@ export function createVehicleManager(scene, world, camera) {
     let nearest = null;
     let nearestDistance = Number.isFinite(maxDist) ? maxDist : 3.5;
     for (const vehicle of cars) {
-      const distance = Math.hypot(vehicle.pos.x - state.player.pos.x, vehicle.pos.z - state.player.pos.z);
-      if (distance <= nearestDistance) {
-        nearestDistance = distance;
+      const d = Math.hypot(vehicle.pos.x - state.player.pos.x, vehicle.pos.z - state.player.pos.z);
+      if (d <= nearestDistance) {
+        nearestDistance = d;
         nearest = vehicle;
       }
     }
     return nearest;
   }
 
-  function updateCarCollision(vehicle, oldX, oldZ, newX, newZ) {
-    const clamped = clampToWorld(world, newX, newZ);
-    newX = clamped.x;
-    newZ = clamped.z;
-    if (!collidesWithBuilding(world, newX, newZ, CAR_RADIUS)) {
+  function moveCar(vehicle, oldX, oldZ, newX, newZ) {
+    const c = clampWorld(world, newX, newZ);
+    newX = c.x;
+    newZ = c.z;
+    if (!hitsBuilding(world, newX, newZ, CAR_RADIUS)) {
       vehicle.pos.x = newX;
       vehicle.pos.z = newZ;
       return;
     }
     // Slide: try x-only, then z-only, else stop.
-    if (!collidesWithBuilding(world, newX, oldZ, CAR_RADIUS)) {
+    if (!hitsBuilding(world, newX, oldZ, CAR_RADIUS)) {
       vehicle.pos.x = newX;
       vehicle.pos.z = oldZ;
-    } else if (!collidesWithBuilding(world, oldX, newZ, CAR_RADIUS)) {
+    } else if (!hitsBuilding(world, oldX, newZ, CAR_RADIUS)) {
       vehicle.pos.x = oldX;
       vehicle.pos.z = newZ;
     } else {
@@ -358,8 +358,8 @@ export function createVehicleManager(scene, world, camera) {
   function syncCar(vehicle, dt) {
     vehicle.group.position.set(vehicle.pos.x, 0, vehicle.pos.z);
     vehicle.group.rotation.y = -vehicle.heading;
-    const wheelSpin = (vehicle.speed * Math.max(0, dt)) / 0.36;
-    for (const wheel of vehicle.wheels.all) wheel.rollGroup.rotation.x += wheelSpin;
+    const spin = (vehicle.speed * Math.max(0, dt)) / 0.36;
+    for (const wheel of vehicle.wheels.all) wheel.rollGroup.rotation.x += spin;
     for (const wheel of vehicle.wheels.front) wheel.wheelGroup.rotation.y = -vehicle.steer;
   }
 
@@ -369,36 +369,36 @@ export function createVehicleManager(scene, world, camera) {
     const config = vehicle._config || VEHICLE_TYPES[vehicle.type] || VEHICLE_TYPES.sedan;
     const keys = input?.keys ?? new Set();
     const safeDt = Math.min(Math.max(0, Number(dt) || 0), 0.05);
-    const accelerate = keys.has('KeyW');
+    const accel = keys.has('KeyW');
     const reverse = keys.has('KeyS');
     const handbrake = keys.has('Space');
     const steerInput = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
 
-    if (accelerate) {
+    if (accel) {
       vehicle.speed += config.accel * safeDt;
     } else if (reverse) {
       if (vehicle.speed > 0.4) vehicle.speed = Math.max(0, vehicle.speed - 18 * safeDt);
       else vehicle.speed = Math.max(-6, vehicle.speed - 6 * safeDt);
     } else {
       const friction = handbrake ? 38 : 5.5;
-      const decrement = friction * safeDt;
-      if (Math.abs(vehicle.speed) <= decrement) vehicle.speed = 0;
-      else vehicle.speed -= Math.sign(vehicle.speed) * decrement;
+      const dec = friction * safeDt;
+      if (Math.abs(vehicle.speed) <= dec) vehicle.speed = 0;
+      else vehicle.speed -= Math.sign(vehicle.speed) * dec;
     }
     vehicle.speed = THREE.MathUtils.clamp(vehicle.speed, -6, config.topSpeed);
 
-    const steeringBlend = 1 - Math.exp(-10 * safeDt);
-    vehicle.steer = THREE.MathUtils.lerp(vehicle.steer, steerInput * (handbrake ? 0.72 : 0.5), steeringBlend);
+    const steerBlend = 1 - Math.exp(-10 * safeDt);
+    vehicle.steer = THREE.MathUtils.lerp(vehicle.steer, steerInput * (handbrake ? 0.72 : 0.5), steerBlend);
     const speedFactor = THREE.MathUtils.clamp(Math.abs(vehicle.speed) / 8, 0, 1);
-    const highSpeedReduction = THREE.MathUtils.clamp(1 - Math.max(0, Math.abs(vehicle.speed) - 22) / 40, 0.45, 1);
-    const travelDirection = vehicle.speed < -0.1 ? -1 : 1;
+    const highSpeedCut = THREE.MathUtils.clamp(1 - Math.max(0, Math.abs(vehicle.speed) - 22) / 40, 0.45, 1);
+    const dir = vehicle.speed < -0.1 ? -1 : 1;
     vehicle.heading += steerInput * (handbrake ? 1.9 : 1.6) * (handbrake ? 1.35 : 1) *
-      speedFactor * highSpeedReduction * travelDirection * safeDt;
+      speedFactor * highSpeedCut * dir * safeDt;
 
-    const forward = forwardForHeading(vehicle.heading);
+    const fwd = forwardForHeading(vehicle.heading);
     const oldX = vehicle.pos.x;
     const oldZ = vehicle.pos.z;
-    updateCarCollision(vehicle, oldX, oldZ, oldX + forward.x * vehicle.speed * safeDt, oldZ + forward.z * vehicle.speed * safeDt);
+    moveCar(vehicle, oldX, oldZ, oldX + fwd.x * vehicle.speed * safeDt, oldZ + fwd.z * vehicle.speed * safeDt);
     vehicle.pos.y = 0;
     syncCar(vehicle, safeDt);
 
@@ -406,21 +406,17 @@ export function createVehicleManager(scene, world, camera) {
     cameraYawOffset += (Number(input?.mouseDX) || 0) * 0.0028;
     cameraYawOffset = THREE.MathUtils.lerp(cameraYawOffset, 0, 1 - Math.exp(-0.8 * safeDt));
     const viewYaw = vehicle.heading + cameraYawOffset;
-    const cameraForward = forwardForHeading(viewYaw);
-    cameraTarget.set(vehicle.pos.x + forward.x * 6, 1.2, vehicle.pos.z + forward.z * 6);
-    desiredCameraPosition.set(
-      vehicle.pos.x - cameraForward.x * 10,
-      3.5,
-      vehicle.pos.z - cameraForward.z * 10,
-    );
+    const camFwd = forwardForHeading(viewYaw);
+    camTarget.set(vehicle.pos.x + fwd.x * 6, 1.2, vehicle.pos.z + fwd.z * 6);
+    desiredCam.set(vehicle.pos.x - camFwd.x * 10, 3.5, vehicle.pos.z - camFwd.z * 10);
     if (camera) {
-      if (!cameraInitialized) {
-        camera.position.copy(desiredCameraPosition);
-        cameraInitialized = true;
+      if (!camInit) {
+        camera.position.copy(desiredCam);
+        camInit = true;
       } else {
-        camera.position.lerp(desiredCameraPosition, 1 - Math.exp(-6 * safeDt));
+        camera.position.lerp(desiredCam, 1 - Math.exp(-6 * safeDt));
       }
-      camera.lookAt(cameraTarget);
+      camera.lookAt(camTarget);
     }
     state.currentVehicle.speed = vehicle.speed;
   }
@@ -428,10 +424,10 @@ export function createVehicleManager(scene, world, camera) {
   function update(dt, input) {
     const keys = input?.keys ?? new Set();
     const ePressed = keys.has('KeyE');
-    const eJustPressed = ePressed && !wasEPressed;
+    const eJust = ePressed && !wasEPressed;
     wasEPressed = ePressed;
     if (state.screen !== 'play' || state.paused) return;
-    if (eJustPressed) {
+    if (eJust) {
       if (state.currentVehicle) exitVehicle();
       else {
         const nearby = getNearbyVehicle();

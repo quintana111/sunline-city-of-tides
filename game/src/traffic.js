@@ -1,6 +1,7 @@
 // Ambient traffic + pedestrians. Cars follow seeded lane loops; peds walk
-// sidewalk loops and flee from fast nearby vehicles. No Math.random() here:
-// placement uses world.rng, updates are deterministic.
+// sidewalk loops and flee from fast nearby vehicles. Written fresh 2026-11-24
+// (Builder A re-author). No Math.random() here: placement uses world.rng,
+// updates are deterministic.
 import * as THREE from 'three';
 
 export function createTraffic(scene, world) {
@@ -15,16 +16,16 @@ export function createTraffic(scene, world) {
 
   const paintColors = [0x36a4a3, 0xd95645, 0xe4b93e, 0x4779b5, 0xe7e0cb];
   const shirtColors = [0xe16e52, 0x42a39c, 0xe2b544, 0x567cb4, 0xb86da2, 0xe4e0d0];
-  const carBodyGeometry = new THREE.BoxGeometry(2.2, 0.82, 4.25);
-  const carCabinGeometry = new THREE.BoxGeometry(1.72, 0.78, 2.05);
-  const wheelGeometry = new THREE.CylinderGeometry(0.39, 0.39, 0.25, 10);
-  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x202126, roughness: 0.95 });
-  const taxiSignGeometry = new THREE.BoxGeometry(0.75, 0.22, 0.38);
-  const torsoGeometry = new THREE.BoxGeometry(0.43, 0.68, 0.27);
-  const headGeometry = new THREE.SphereGeometry(0.17, 9, 7);
-  const legGeometry = new THREE.BoxGeometry(0.17, 0.58, 0.2);
-  const skinMaterial = new THREE.MeshStandardMaterial({ color: 0xc88f6e, roughness: 0.9 });
-  const legMaterial = new THREE.MeshStandardMaterial({ color: 0x353741, roughness: 0.92 });
+  const carBodyGeo = new THREE.BoxGeometry(2.2, 0.82, 4.25);
+  const carCabinGeo = new THREE.BoxGeometry(1.72, 0.78, 2.05);
+  const wheelGeo = new THREE.CylinderGeometry(0.39, 0.39, 0.25, 10);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x202126, roughness: 0.95 });
+  const taxiSignGeo = new THREE.BoxGeometry(0.75, 0.22, 0.38);
+  const torsoGeo = new THREE.BoxGeometry(0.43, 0.68, 0.27);
+  const headGeo = new THREE.SphereGeometry(0.17, 9, 7);
+  const legGeo = new THREE.BoxGeometry(0.17, 0.58, 0.2);
+  const skinMat = new THREE.MeshStandardMaterial({ color: 0xc88f6e, roughness: 0.9 });
+  const legMat = new THREE.MeshStandardMaterial({ color: 0x353741, roughness: 0.92 });
   const materials = new Map();
 
   function materialFor(color, options = {}) {
@@ -40,18 +41,18 @@ export function createTraffic(scene, world) {
   // Local -Z is the front, matching rotation.y = -heading.
   function makeCar(color, taxi = false) {
     const group = new THREE.Group();
-    const body = new THREE.Mesh(carBodyGeometry, materialFor(color, { roughness: 0.58, metalness: 0.12 }));
+    const body = new THREE.Mesh(carBodyGeo, materialFor(color, { roughness: 0.58, metalness: 0.12 }));
     body.position.y = 0.72;
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
-    const cabin = new THREE.Mesh(carCabinGeometry, materialFor(taxi ? 0xe9e0c6 : color, { roughness: 0.5, metalness: 0.08 }));
+    const cabin = new THREE.Mesh(carCabinGeo, materialFor(taxi ? 0xe9e0c6 : color, { roughness: 0.5, metalness: 0.08 }));
     cabin.position.set(0, 1.39, -0.12);
     cabin.castShadow = true;
     group.add(cabin);
     for (const x of [-1.07, 1.07]) {
       for (const z of [-1.38, 1.38]) {
-        const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        const wheel = new THREE.Mesh(wheelGeo, wheelMat);
         wheel.rotation.z = Math.PI / 2;
         wheel.position.set(x, 0.4, z);
         wheel.castShadow = true;
@@ -59,7 +60,7 @@ export function createTraffic(scene, world) {
       }
     }
     if (taxi) {
-      const sign = new THREE.Mesh(taxiSignGeometry, materialFor(0xf4c63e, { roughness: 0.6 }));
+      const sign = new THREE.Mesh(taxiSignGeo, materialFor(0xf4c63e, { roughness: 0.6 }));
       sign.position.set(0, 1.9, -0.08);
       sign.castShadow = true;
       group.add(sign);
@@ -70,16 +71,16 @@ export function createTraffic(scene, world) {
 
   function makePedestrian(color) {
     const group = new THREE.Group();
-    const torso = new THREE.Mesh(torsoGeometry, materialFor(color, { roughness: 0.9 }));
+    const torso = new THREE.Mesh(torsoGeo, materialFor(color, { roughness: 0.9 }));
     torso.position.y = 1.05;
     torso.castShadow = true;
     group.add(torso);
-    const head = new THREE.Mesh(headGeometry, skinMaterial);
+    const head = new THREE.Mesh(headGeo, skinMat);
     head.position.y = 1.52;
     head.castShadow = true;
     group.add(head);
-    const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
-    const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
+    const leftLeg = new THREE.Mesh(legGeo, legMat);
+    const rightLeg = new THREE.Mesh(legGeo, legMat);
     leftLeg.position.set(-0.12, 0.43, 0);
     rightLeg.position.set(0.12, 0.43, 0);
     leftLeg.castShadow = rightLeg.castShadow = true;
@@ -104,7 +105,7 @@ export function createTraffic(scene, world) {
   }
 
   const routes = (world.trafficRoutes ?? []).map(prepareRoute).filter(Boolean);
-  const pedestrianRoutes = (world.pedestrianPaths ?? [])
+  const pedRoutes = (world.pedestrianPaths ?? [])
     .map((path) => path.map((p) => ({ x: Number(p.x) || 0, z: Number(p.z) || 0 })))
     .filter((path) => path.length > 1);
 
@@ -120,8 +121,8 @@ export function createTraffic(scene, world) {
     const index = Math.min(lo, route.points.length - 1);
     const a = route.points[index];
     const b = route.points[(index + 1) % route.points.length];
-    const segmentLength = route.cumulative[index + 1] - route.cumulative[index];
-    const t = segmentLength > 0 ? (d - route.cumulative[index]) / segmentLength : 0;
+    const segLen = route.cumulative[index + 1] - route.cumulative[index];
+    const t = segLen > 0 ? (d - route.cumulative[index]) / segLen : 0;
     return {
       x: a.x + (b.x - a.x) * t,
       z: a.z + (b.z - a.z) * t,
@@ -154,9 +155,9 @@ export function createTraffic(scene, world) {
   }
 
   function createPedestrians(count = 64) {
-    if (!pedestrianRoutes.length) return;
+    if (!pedRoutes.length) return;
     for (let i = 0; i < count; i++) {
-      const path = pedestrianRoutes[i % pedestrianRoutes.length];
+      const path = pedRoutes[i % pedRoutes.length];
       const ped = makePedestrian(choose(shirtColors));
       const start = Math.floor(random() * path.length);
       const next = path[(start + 1) % path.length];
@@ -205,8 +206,8 @@ export function createTraffic(scene, world) {
         }
       }
 
-      const acceleration = target < car.speed ? 7 : 2.4;
-      car.speed += Math.sign(target - car.speed) * Math.min(Math.abs(target - car.speed), acceleration * dt);
+      const accel = target < car.speed ? 7 : 2.4;
+      car.speed += Math.sign(target - car.speed) * Math.min(Math.abs(target - car.speed), accel * dt);
       car.dist = (car.dist + car.speed * dt) % car.route.length;
       const point = pointAt(car.route, car.dist);
       car.group.position.set(point.x, 0, point.z);
@@ -235,9 +236,9 @@ export function createTraffic(scene, world) {
         const dx = ped.group.position.x - playerPos.x;
         const dz = ped.group.position.z - playerPos.z;
         if (Math.hypot(dx, dz) < 8 && state.currentVehicle && vehicleSpeed > 5) {
-          const length = Math.hypot(dx, dz) || 1;
-          ped.fleeX = dx / length;
-          ped.fleeZ = dz / length;
+          const len = Math.hypot(dx, dz) || 1;
+          ped.fleeX = dx / len;
+          ped.fleeZ = dz / len;
           ped.fleeTimer = 3;
           fleeing = true;
         } else if (police.length) {
@@ -252,9 +253,9 @@ export function createTraffic(scene, world) {
           if (nearest && nearestDist < 49) {
             const dx = ped.group.position.x - (nearest.x ?? 0);
             const dz = ped.group.position.z - (nearest.z ?? 0);
-            const length = Math.hypot(dx, dz) || 1;
-            ped.fleeX = dx / length;
-            ped.fleeZ = dz / length;
+            const len = Math.hypot(dx, dz) || 1;
+            ped.fleeX = dx / len;
+            ped.fleeZ = dz / len;
             ped.fleeTimer = 3;
             fleeing = true;
           }

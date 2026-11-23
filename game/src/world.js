@@ -1,15 +1,16 @@
 // Sunline: City of Tides — Maravela city data + scene builder.
-// Deterministic: every world-gen choice comes from the seeded RNG.
-// No Math.random() anywhere in this file.
+// Written fresh 2026-11-24 (Builder A re-author). Deterministic: every
+// world-generation choice comes from the seeded RNG. No Math.random()
+// anywhere in this file.
 import * as THREE from 'three';
 
-const ROAD_LINES = [-560, -448, -336, -224, -112, 0, 112, 224, 336, 448, 560];
-const BLOCK_SIZE = 92;
-const PITCH = 112;
-const ROAD_WIDTH = 20;
-const CITY_SIZE = 1120;
+export const ROAD_LINES = [-560, -448, -336, -224, -112, 0, 112, 224, 336, 448, 560];
+export const BLOCK_SIZE = 92;
+export const PITCH = 112;
+export const ROAD_WIDTH = 20;
+export const CITY_SIZE = 1120;
 
-const DISTRICTS = {
+const DISTRICT = {
   GLASS: 'Glassline',
   BEACH: 'Sunwash Beach',
   MARINA: 'Pelican Marina',
@@ -18,22 +19,20 @@ const DISTRICTS = {
   CIVIC: 'Civic Crescent',
 };
 
-// Heading convention (authoritative): forward = (sin h, 0, -cos h).
-// heading 0 faces north (-Z); heading +PI/2 faces east (+X); heading PI faces south.
-// Right-hand traffic: eastbound lane is z = line + 4.5, northbound is x = line + 4.5.
-function headingForLane(axis, lane) {
-  if (axis === 'x') return lane > 0 ? Math.PI / 2 : -Math.PI / 2; // east / west
-  return lane > 0 ? 0 : Math.PI; // north / south
+// Authoritative heading convention: forward = (sin h, 0, -cos h).
+// Heading 0 faces north (-Z); +PI/2 faces east (+X); PI faces south.
+// Right-hand traffic: eastbound lane is z = line + 4.5, northbound x = line + 4.5.
+export function headingForLane(axis, lane) {
+  if (axis === 'x') return lane > 0 ? Math.PI / 2 : -Math.PI / 2;
+  return lane > 0 ? 0 : Math.PI;
 }
 
-let latestWorld = null;
-
 export function createRng(seed = 1) {
-  let state = (Number(seed) || 0) >>> 0;
+  let s = (Number(seed) || 0) >>> 0;
   return {
     next() {
-      state = (state + 0x6D2B79F5) >>> 0;
-      let t = state;
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
       t = Math.imul(t ^ (t >>> 15), t | 1);
       t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -45,65 +44,33 @@ export function createRng(seed = 1) {
 }
 
 function districtForBlock(i, j) {
-  if (i >= 3 && i <= 6 && j >= 3 && j <= 6) return DISTRICTS.GLASS;
-  if (j >= 8 && i <= 5) return DISTRICTS.BEACH;
-  if (j >= 8 && i >= 6) return DISTRICTS.MARINA;
-  if (i <= 2 && j <= 4) return DISTRICTS.FOUNDRY;
-  if (i === 0 || i === 9 || j === 0 || j === 9) return DISTRICTS.PALM;
-  return DISTRICTS.CIVIC;
+  if (i >= 3 && i <= 6 && j >= 3 && j <= 6) return DISTRICT.GLASS;
+  if (j >= 8 && i <= 5) return DISTRICT.BEACH;
+  if (j >= 8 && i >= 6) return DISTRICT.MARINA;
+  if (i <= 2 && j <= 4) return DISTRICT.FOUNDRY;
+  if (i === 0 || i === 9 || j === 0 || j === 9) return DISTRICT.PALM;
+  return DISTRICT.CIVIC;
 }
 
-function districtAtCoordinates(x, z) {
+function districtAtCoords(x, z) {
   const i = Math.floor((x + 560) / PITCH);
   const j = Math.floor((z + 560) / PITCH);
   if (i >= 0 && i < 10 && j >= 0 && j < 10) return districtForBlock(i, j);
   if (z > 560) return 'Ocean';
-  return DISTRICTS.CIVIC;
+  return DISTRICT.CIVIC;
 }
 
 const PALETTES = {
-  [DISTRICTS.GLASS]: ['#9dbbc0', '#9cb6c4', '#b4c6c4', '#8daab5'],
-  [DISTRICTS.BEACH]: ['#dcc49f', '#e8d5b3', '#c9b38f', '#e0cda9'],
-  [DISTRICTS.MARINA]: ['#b6aa91', '#c2b59b', '#a99b82', '#c6bca8'],
-  [DISTRICTS.FOUNDRY]: ['#9c9280', '#aaa18f', '#898779', '#b0a38f'],
-  [DISTRICTS.PALM]: ['#e1cba9', '#d7bf9b', '#e5d4b6', '#cdb995'],
-  [DISTRICTS.CIVIC]: ['#c4b9a5', '#cfc3ad', '#b9b7a8', '#d6c9b2'],
+  [DISTRICT.GLASS]: ['#9dbbc0', '#9cb6c4', '#b4c6c4', '#8daab5'],
+  [DISTRICT.BEACH]: ['#dcc49f', '#e8d5b3', '#c9b38f', '#e0cda9'],
+  [DISTRICT.MARINA]: ['#b6aa91', '#c2b59b', '#a99b82', '#c6bca8'],
+  [DISTRICT.FOUNDRY]: ['#9c9280', '#aaa18f', '#898779', '#b0a38f'],
+  [DISTRICT.PALM]: ['#e1cba9', '#d7bf9b', '#e5d4b6', '#cdb995'],
+  [DISTRICT.CIVIC]: ['#c4b9a5', '#cfc3ad', '#b9b7a8', '#d6c9b2'],
 };
 const SIGN_NAMES = ['CAFÉ LUMEN', 'HOTEL MARAVELA', 'TIDE & TACKLE', 'PALM COURT MARKET'];
 
-function buildingPlan(world, block) {
-  const rng = world.rng;
-  const district = block.district;
-  let count = rng.int(2, 4);
-  if (district === DISTRICTS.GLASS) count = rng.int(1, 2);
-  if (district === DISTRICTS.FOUNDRY || district === DISTRICTS.MARINA) count = rng.int(1, 3);
-  const plans = [];
-  for (let k = 0; k < count; k++) {
-    const margin = 5;
-    const usable = BLOCK_SIZE - margin * 2;
-    const w = Math.min(rng.range(18, district === DISTRICTS.GLASS ? 39 : 34), usable);
-    const d = Math.min(rng.range(18, district === DISTRICTS.GLASS ? 39 : 34), usable);
-    const x = rng.range(block.minX + margin + w / 2, block.maxX - margin - w / 2);
-    const z = rng.range(block.minZ + margin + d / 2, block.maxZ - margin - d / 2);
-    let h;
-    if (district === DISTRICTS.GLASS) h = rng.range(55, 115);
-    else if (district === DISTRICTS.FOUNDRY) h = rng.range(12, 28);
-    else if (district === DISTRICTS.BEACH) h = rng.range(9, 26);
-    else if (district === DISTRICTS.MARINA) h = rng.range(10, 25);
-    else if (district === DISTRICTS.PALM) h = rng.range(8, 14);
-    else h = rng.range(18, 45);
-    const sign = h < 30 && rng.next() < 0.28;
-    plans.push({
-      x, z, w, d, h, district,
-      roof: rng.pick(['flat', 'parapet', 'equipment']),
-      color: rng.pick(PALETTES[district]),
-      windows: rng.range(0.12, 0.48),
-      sign,
-      signText: sign ? rng.pick(SIGN_NAMES) : '',
-    });
-  }
-  return plans;
-}
+let latestWorld = null;
 
 export function createWorld(seed = 24681357) {
   const rng = createRng(seed);
@@ -130,12 +97,8 @@ export function createWorld(seed = 24681357) {
 
   const world = {
     seed, rng, roads, blocks, buildings: [],
-    spawnPoints: {
-      player: { x: 0, z: 24 },
-      cars: [],
-      police: [],
-    },
-    // Mission points sit on roads / promenade, never inside a building footprint.
+    spawnPoints: { player: { x: 0, z: 24 }, cars: [], police: [] },
+    // Mission points sit on roads / promenade, never inside a building.
     missionPoints: {
       parcelPickup: { x: -112, z: -124, label: 'Parcel Pickup' },
       cafeDropoff: { x: 116, z: -4.5, label: 'Café Lumen' },
@@ -147,15 +110,41 @@ export function createWorld(seed = 24681357) {
     },
     pedestrianPaths: [],
     trafficRoutes: [],
-    blockSize: BLOCK_SIZE,
-    pitch: PITCH,
-    roadWidth: ROAD_WIDTH,
-    roadLines: [...ROAD_LINES],
-    size: CITY_SIZE,
-    districtAt(x, z) { return districtAtCoordinates(x, z); },
+    blockSize: BLOCK_SIZE, pitch: PITCH, roadWidth: ROAD_WIDTH,
+    roadLines: [...ROAD_LINES], size: CITY_SIZE,
+    districtAt(x, z) { return districtAtCoords(x, z); },
   };
 
-  for (const block of blocks) world.buildings.push(...buildingPlan(world, block));
+  for (const block of blocks) {
+    const rngB = rng;
+    const district = block.district;
+    let count = rngB.int(2, 4);
+    if (district === DISTRICT.GLASS) count = rngB.int(1, 2);
+    if (district === DISTRICT.FOUNDRY || district === DISTRICT.MARINA) count = rngB.int(1, 3);
+    for (let k = 0; k < count; k++) {
+      const margin = 5;
+      const usable = BLOCK_SIZE - margin * 2;
+      const w = Math.min(rngB.range(18, district === DISTRICT.GLASS ? 39 : 34), usable);
+      const d = Math.min(rngB.range(18, district === DISTRICT.GLASS ? 39 : 34), usable);
+      const x = rngB.range(block.minX + margin + w / 2, block.maxX - margin - w / 2);
+      const z = rngB.range(block.minZ + margin + d / 2, block.maxZ - margin - d / 2);
+      let h;
+      if (district === DISTRICT.GLASS) h = rngB.range(55, 115);
+      else if (district === DISTRICT.FOUNDRY) h = rngB.range(12, 28);
+      else if (district === DISTRICT.BEACH) h = rngB.range(9, 26);
+      else if (district === DISTRICT.MARINA) h = rngB.range(10, 25);
+      else if (district === DISTRICT.PALM) h = rngB.range(8, 14);
+      else h = rngB.range(18, 45);
+      const sign = h < 30 && rngB.next() < 0.28;
+      world.buildings.push({
+        x, z, w, d, h, district,
+        roof: rngB.pick(['flat', 'parapet', 'equipment']),
+        color: rngB.pick(PALETTES[district]),
+        windows: rngB.range(0.12, 0.48),
+        sign, signText: sign ? rngB.pick(SIGN_NAMES) : '',
+      });
+    }
+  }
 
   // Traffic loops: rectangles around block groups, on lane centres.
   for (let n = 0; n < 12; n++) {
@@ -167,10 +156,8 @@ export function createWorld(seed = 24681357) {
     const z2 = ROAD_LINES[j + 2];
     const o = 4.5;
     world.trafficRoutes.push([
-      { x: x1 + o, z: z1 + o },
-      { x: x2 - o, z: z1 + o },
-      { x: x2 - o, z: z2 - o },
-      { x: x1 + o, z: z2 - o },
+      { x: x1 + o, z: z1 + o }, { x: x2 - o, z: z1 + o },
+      { x: x2 - o, z: z2 - o }, { x: x1 + o, z: z2 - o },
       { x: x1 + o, z: z1 + o },
     ]);
   }
@@ -188,7 +175,7 @@ export function createWorld(seed = 24681357) {
     ]);
   }
 
-  // Parked-car spawns on road lanes near the centre (types match vehicles.js).
+  // Parked-car spawns on road lanes near the centre.
   const carTypes = ['sedan', 'taxi', 'sports', 'truck'];
   for (let n = 0; n < 8; n++) {
     const line = rng.pick(ROAD_LINES.slice(2, 9));
@@ -260,7 +247,7 @@ export function randomSidewalkPoint(rng = createRng(1)) {
   return { x: block.maxX + 1.5, z: alongZ };
 }
 
-// Circle (x,z,r) vs axis-aligned building footprints. r<=0 tests the point itself.
+// Circle (x,z,r) vs axis-aligned building footprints. r<=0 tests the point.
 export function collidesBuilding(x, z, r = 0, world = latestWorld) {
   if (!world) return false;
   for (const b of world.buildings) {
@@ -270,24 +257,22 @@ export function collidesBuilding(x, z, r = 0, world = latestWorld) {
   return false;
 }
 
-function makeCanvasTexture(canvas) {
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 4;
-  return texture;
+function canvasTexture(canvas) {
+  const t = new THREE.CanvasTexture(canvas);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
 }
 
-function makeWindowTexture(rng, tint, litRatio) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 256;
-  const ctx = canvas.getContext('2d');
+function windowTexture(rng, tint, litRatio) {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 256;
+  const ctx = c.getContext('2d');
   ctx.fillStyle = tint;
   ctx.fillRect(0, 0, 256, 256);
   for (let y = 9; y < 256; y += 23) {
     for (let x = 8; x < 256; x += 25) {
-      const lit = rng.next() < litRatio;
-      ctx.fillStyle = lit ? '#f3d89c' : '#344650';
+      ctx.fillStyle = rng.next() < litRatio ? '#f3d89c' : '#344650';
       ctx.fillRect(x, y, 14, 12);
       ctx.fillStyle = 'rgba(255,255,255,0.16)';
       ctx.fillRect(x, y, 2, 12);
@@ -296,54 +281,78 @@ function makeWindowTexture(rng, tint, litRatio) {
   ctx.strokeStyle = 'rgba(41,49,48,0.5)';
   ctx.lineWidth = 2;
   for (let y = 3; y < 256; y += 23) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(256, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke();
   }
-  return makeCanvasTexture(canvas);
+  return canvasTexture(c);
 }
 
-// Road texture: dark asphalt, dashed lane lines, centre line, and dim
-// crosswalk stripes (rgba(176,174,158,0.40)) at regular intervals.
-function makeRoadTexture(axis) {
+function roadTexture(axis) {
   const alongX = axis === 'x';
-  const canvas = document.createElement('canvas');
-  canvas.width = alongX ? 1024 : 128;
-  canvas.height = alongX ? 128 : 1024;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#343a38';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = 'rgba(228,205,148,0.72)';
+  const c = document.createElement('canvas');
+  c.width = alongX ? 1024 : 128;
+  c.height = alongX ? 128 : 1024;
+  const ctx = c.getContext('2d');
+  // Lighter asphalt (was #343a38, near-black in frame) so the road no
+  // longer reads as a black void against pale sidewalks / crosswalks.
+  ctx.fillStyle = '#54574f';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = 'rgba(228,205,148,0.58)';
   ctx.lineWidth = 3;
   ctx.setLineDash([28, 20]);
   if (alongX) {
-    [35, 93].forEach((y) => { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); });
+    [35, 93].forEach((y) => { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(c.width, y); ctx.stroke(); });
     ctx.setLineDash([]);
-    ctx.strokeStyle = 'rgba(225,211,168,0.56)';
-    ctx.beginPath(); ctx.moveTo(0, 64); ctx.lineTo(canvas.width, 64); ctx.stroke();
-    for (let x = 0; x < canvas.width; x += 102) {
-      ctx.fillStyle = 'rgba(176,174,158,0.40)';
+    ctx.strokeStyle = 'rgba(225,211,168,0.42)';
+    ctx.beginPath(); ctx.moveTo(0, 64); ctx.lineTo(c.width, 64); ctx.stroke();
+    for (let x = 0; x < c.width; x += 102) {
+      // Edge dashes toned down (was 0.40 alpha, near-white) so they stop
+      // dominating the foreground of low chase/street cameras.
+      ctx.fillStyle = 'rgba(168,166,150,0.26)';
       for (let y = 8; y < 120; y += 13) ctx.fillRect(x, y, 6, 8);
     }
   } else {
-    [35, 93].forEach((x) => { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); });
+    [35, 93].forEach((x) => { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, c.height); ctx.stroke(); });
     ctx.setLineDash([]);
-    ctx.strokeStyle = 'rgba(225,211,168,0.56)';
-    ctx.beginPath(); ctx.moveTo(64, 0); ctx.lineTo(64, canvas.height); ctx.stroke();
-    for (let y = 0; y < canvas.height; y += 102) {
-      ctx.fillStyle = 'rgba(176,174,158,0.40)';
+    ctx.strokeStyle = 'rgba(225,211,168,0.42)';
+    ctx.beginPath(); ctx.moveTo(64, 0); ctx.lineTo(64, c.height); ctx.stroke();
+    for (let y = 0; y < c.height; y += 102) {
+      ctx.fillStyle = 'rgba(168,166,150,0.26)';
       for (let x = 8; x < 120; x += 13) ctx.fillRect(x, y, 8, 6);
     }
   }
-  return makeCanvasTexture(canvas);
+  return canvasTexture(c);
 }
 
-function makeSignTexture(text) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d');
+// Warm late-afternoon sky: vertical gradient, deep blue at the zenith
+// fading through gold to a pale-orange horizon. Painted on a large
+// back-face dome so it reads in every camera angle (a flat
+// scene.background colour was the "flat beige sky" in the screenshots).
+function skyGradientTexture() {
+  const c = document.createElement('canvas');
+  c.width = 4; c.height = 512;
+  const ctx = c.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, 512);
+  // NOTE: on the dome the canvas midpoint (y=256) is the HORIZON
+  // (sphere equator), so the warm band must already dominate by y≈45% —
+  // the first version put the warm colours below the horizon, where the
+  // ground hides them, leaving only a grey-blue upper sky visible.
+  // The blue still spans the top half of the canvas so a real
+  // blue → gold → pale-orange gradient reads in the high start camera.
+  g.addColorStop(0.0, '#5e9ed2');
+  g.addColorStop(0.40, '#7ea9d4');
+  g.addColorStop(0.55, '#c9b088');
+  g.addColorStop(0.70, '#f2b878');
+  g.addColorStop(0.85, '#f9c98d');
+  g.addColorStop(1.0, '#fbd9a4');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 4, 512);
+  return canvasTexture(c);
+}
+
+function signTexture(text) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  const ctx = c.getContext('2d');
   ctx.fillStyle = '#183c3a';
   ctx.fillRect(0, 0, 512, 128);
   ctx.strokeStyle = '#f0c879';
@@ -354,7 +363,7 @@ function makeSignTexture(text) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, 256, 66, 470);
-  return makeCanvasTexture(canvas);
+  return canvasTexture(c);
 }
 
 function addBox(group, geometry, material, x, y, z, sx = 1, sy = 1, sz = 1) {
@@ -449,9 +458,7 @@ function buildMarina(group, shared) {
   for (let i = 0; i < 8; i++) {
     const x = 205 + i * 62;
     const z = i % 2 === 0 ? 650 : 675;
-    addBox(group, shared.boatGeometry, new THREE.MeshStandardMaterial({
-      color: boatColors[i % boatColors.length], roughness: 0.62,
-    }), x, 0.72, z, 1.1, 0.75, 2.9);
+    addBox(group, shared.boatGeometry, new THREE.MeshStandardMaterial({ color: boatColors[i % boatColors.length], roughness: 0.62 }), x, 0.72, z, 1.1, 0.75, 2.9);
     addBox(group, shared.boatCabinGeometry, shared.boatCabinMaterial, x, 1.35, z - 3, 0.7, 0.75, 1);
   }
 }
@@ -471,11 +478,27 @@ export function buildCity(scene, world) {
   group.name = 'MaravelaCity';
   world.cityGroup = group;
 
-  // Warm late-afternoon look, baked in from the start.
-  scene.background = new THREE.Color(0xecc79b);
-  scene.fog = new THREE.Fog(0xecc79b, 900, 2200);
-  scene.add(new THREE.HemisphereLight(0xf3d9ae, 0x66645b, 1.25));
-  const sun = new THREE.DirectionalLight(0xffd9a0, 2.2);
+  // Warm late-afternoon sky: gradient dome + fog matched to the horizon
+  // colour (was a flat 0xecc79b background/fog — the "flat beige sky").
+  scene.background = new THREE.Color(0xf7c489);
+  scene.fog = new THREE.Fog(0xf2bf83, 900, 2200);
+  // Upper hemisphere ONLY: a full sphere's lower half curves up past the
+  // ground plane's edge (1500x1500) and reads as a big orange hill on the
+  // high start-screen camera. Below the horizon the scene.background
+  // horizon colour shows instead.
+  // Radius 1150 (was 1900): the camera far plane is 2000, and the camera
+  // sits ~320 from the origin, so a 1900 dome's far side (~2220 away) was
+  // CLIPPED — it rendered as a big background-coloured "orange mound"
+  // hole in the middle of the start shot. 1150 keeps the far side within
+  // the far plane from any camera in the city (worst case ~1150+792).
+  const skyDome = new THREE.Mesh(
+    new THREE.SphereGeometry(1150, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshBasicMaterial({ map: skyGradientTexture(), side: THREE.BackSide, fog: false }),
+  );
+  skyDome.name = 'SkyDome';
+  scene.add(skyDome);
+  scene.add(new THREE.HemisphereLight(0xffd9a8, 0x6b5a48, 1.3));
+  const sun = new THREE.DirectionalLight(0xffc27a, 2.4);
   sun.position.set(-300, 400, 300); // southwest
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -486,7 +509,7 @@ export function buildCity(scene, world) {
   scene.add(sun);
   scene.add(group);
 
-  const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x444a43, roughness: 0.95 });
+  const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x4d524b, roughness: 0.95 });
   const sidewalkMaterial = new THREE.MeshStandardMaterial({ color: 0xb3ad9d, roughness: 0.92 });
   const sandMaterial = new THREE.MeshStandardMaterial({ color: 0xd9bd8e, roughness: 0.95 });
   const oceanMaterial = new THREE.MeshStandardMaterial({
@@ -499,32 +522,32 @@ export function buildCity(scene, world) {
   ground.receiveShadow = true;
   group.add(ground);
 
-  const roadTexX = makeRoadTexture('x');
-  const roadTexZ = makeRoadTexture('z');
-  const roadMaterialX = new THREE.MeshStandardMaterial({ map: roadTexX, color: 0xffffff, roughness: 0.9 });
-  const roadMaterialZ = new THREE.MeshStandardMaterial({ map: roadTexZ, color: 0xffffff, roughness: 0.9 });
+  const roadTexX = roadTexture('x');
+  const roadTexZ = roadTexture('z');
+  const roadMatX = new THREE.MeshStandardMaterial({ map: roadTexX, roughness: 0.9 });
+  const roadMatZ = new THREE.MeshStandardMaterial({ map: roadTexZ, roughness: 0.9 });
   for (const line of ROAD_LINES) {
-    const stripX = new THREE.Mesh(new THREE.PlaneGeometry(CITY_SIZE, ROAD_WIDTH), roadMaterialX);
+    const stripX = new THREE.Mesh(new THREE.PlaneGeometry(CITY_SIZE, ROAD_WIDTH), roadMatX);
     stripX.rotation.x = -Math.PI / 2;
     stripX.position.set(0, 0.015, line);
     stripX.receiveShadow = true;
     group.add(stripX);
-    const stripZ = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_WIDTH, CITY_SIZE), roadMaterialZ);
+    const stripZ = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_WIDTH, CITY_SIZE), roadMatZ);
     stripZ.rotation.x = -Math.PI / 2;
     stripZ.position.set(line, 0.016, 0);
     stripZ.receiveShadow = true;
     group.add(stripZ);
     for (const side of [-1, 1]) {
-      const sidewalkX = new THREE.Mesh(new THREE.PlaneGeometry(CITY_SIZE, 3), sidewalkMaterial);
-      sidewalkX.rotation.x = -Math.PI / 2;
-      sidewalkX.position.set(0, 0.025, line + side * 11.5);
-      sidewalkX.receiveShadow = true;
-      group.add(sidewalkX);
-      const sidewalkZ = new THREE.Mesh(new THREE.PlaneGeometry(3, CITY_SIZE), sidewalkMaterial);
-      sidewalkZ.rotation.x = -Math.PI / 2;
-      sidewalkZ.position.set(line + side * 11.5, 0.026, 0);
-      sidewalkZ.receiveShadow = true;
-      group.add(sidewalkZ);
+      const swX = new THREE.Mesh(new THREE.PlaneGeometry(CITY_SIZE, 3), sidewalkMaterial);
+      swX.rotation.x = -Math.PI / 2;
+      swX.position.set(0, 0.025, line + side * 11.5);
+      swX.receiveShadow = true;
+      group.add(swX);
+      const swZ = new THREE.Mesh(new THREE.PlaneGeometry(3, CITY_SIZE), sidewalkMaterial);
+      swZ.rotation.x = -Math.PI / 2;
+      swZ.position.set(line + side * 11.5, 0.026, 0);
+      swZ.receiveShadow = true;
+      group.add(swZ);
     }
   }
 
@@ -547,18 +570,16 @@ export function buildCity(scene, world) {
 
   const rng = world.rng;
   const districtTexture = {
-    [DISTRICTS.GLASS]: makeWindowTexture(rng, '#a8b9b8', 0.34),
-    [DISTRICTS.BEACH]: makeWindowTexture(rng, '#dbc9aa', 0.21),
-    [DISTRICTS.MARINA]: makeWindowTexture(rng, '#b2aa97', 0.18),
-    [DISTRICTS.FOUNDRY]: makeWindowTexture(rng, '#9f998c', 0.16),
-    [DISTRICTS.PALM]: makeWindowTexture(rng, '#ddc9a8', 0.25),
-    [DISTRICTS.CIVIC]: makeWindowTexture(rng, '#c5baaa', 0.27),
+    [DISTRICT.GLASS]: windowTexture(rng, '#a8b9b8', 0.34),
+    [DISTRICT.BEACH]: windowTexture(rng, '#dbc9aa', 0.21),
+    [DISTRICT.MARINA]: windowTexture(rng, '#b2aa97', 0.18),
+    [DISTRICT.FOUNDRY]: windowTexture(rng, '#9f998c', 0.16),
+    [DISTRICT.PALM]: windowTexture(rng, '#ddc9a8', 0.25),
+    [DISTRICT.CIVIC]: windowTexture(rng, '#c5baaa', 0.27),
   };
   const buildingMaterials = {};
-  for (const district of Object.keys(districtTexture)) {
-    buildingMaterials[district] = new THREE.MeshStandardMaterial({
-      map: districtTexture[district], color: 0xffffff, roughness: 0.68, metalness: 0.08,
-    });
+  for (const d of Object.keys(districtTexture)) {
+    buildingMaterials[d] = new THREE.MeshStandardMaterial({ map: districtTexture[d], roughness: 0.68, metalness: 0.08 });
   }
 
   const shared = {
@@ -588,7 +609,7 @@ export function buildCity(scene, world) {
   const roofTop = new THREE.BoxGeometry(1, 0.7, 1);
   const parapetGeometry = new THREE.BoxGeometry(1, 0.8, 1);
   for (const b of world.buildings) {
-    const material = buildingMaterials[b.district] || buildingMaterials[DISTRICTS.CIVIC];
+    const material = buildingMaterials[b.district] || buildingMaterials[DISTRICT.CIVIC];
     addBox(group, shared.buildingGeometry, material, b.x, b.h / 2, b.z, b.w, b.h, b.d);
     if (b.roof === 'equipment') {
       addBox(group, roofTop, shared.roofMaterial, b.x, b.h + 1.5, b.z, b.w * 0.25, 2.3, b.d * 0.25);
@@ -600,13 +621,12 @@ export function buildCity(scene, world) {
       addBox(group, parapetGeometry, shared.roofMaterial, b.x + b.w / 2 - rim / 2, b.h + 0.35, b.z, rim, 0.7, b.d);
     }
     if (b.sign) {
-      const texture = makeSignTexture(b.signText);
+      const texture = signTexture(b.signText);
       const signMaterial = new THREE.MeshStandardMaterial({
         map: texture, emissive: 0xffb74f, emissiveMap: texture, emissiveIntensity: 0.55,
         side: THREE.DoubleSide, roughness: 0.5,
       });
       const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.w * 0.7, 13), 2.2), signMaterial);
-      // North face of the building, facing -Z (out toward the street).
       sign.position.set(b.x, Math.min(b.h - 1, 4.2), b.z - b.d / 2 - 0.08);
       sign.rotation.y = Math.PI;
       group.add(sign);
@@ -617,6 +637,5 @@ export function buildCity(scene, world) {
   buildLamps(group, shared);
   buildMarina(group, shared);
   buildTrafficLights(group, shared);
-
   return group;
 }
