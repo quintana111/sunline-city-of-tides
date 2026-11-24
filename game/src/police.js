@@ -1,296 +1,332 @@
-// Police + wanted system for Sunline: City of Tides.
-// Wanted 0-5, witnessed crime reports, cruiser pursuit, escape decay.
-// Forward = (sin h, 0, -cos h); mesh rotation.y = -heading. No Math.random().
-import * as THREE from 'three';
+// police.js — wanted levels + pursuing cruisers for Sunline: City of Tides.
+// Fresh implementation from design-r3.md sections 6 and 11.
+// Heading convention (authoritative): forward = (sin h, 0, -cos h);
+// mesh rotation.y = -heading. Pursuit always drives FORWARD.
+import * as THREE from '../vendor/three.min.js';
+
+const ROAD_LINES = [-560, -448, -336, -224, -112, 0, 112, 224, 336, 448, 560];
+const MAX_UNITS = 3;
+const CRUISE_TOP = 26;
+const RAISES = { vehicleTheft: 1, assault: 1, weaponFire: 2, attackPolice: 2, propertyDamage: 1 };
+const ALWAYS_WITNESSED = new Set(['attackPolice', 'weaponFire']);
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+function nearestLine(v) {
+  let best = ROAD_LINES[0];
+  for (const line of ROAD_LINES) if (Math.abs(v - line) < Math.abs(v - best)) best = line;
+  return best;
+}
+// Nearest peds, for the witnessed-crime rule. Police owns no traffic
+// reference, so it reads the live game object when present (browser) and
+// degrades to "no witnesses" anywhere else (Node tests).
+function readPeds() {
+  try {
+    const g = globalThis.__game;
+    if (g && g.traffic && Array.isArray(g.traffic.peds)) return g.traffic.peds;
+  } catch (e) { /* no live game */ }
+  return [];
+}
+
+let sharedMats = null;
+function cruiserMaterials() {
+  if (sharedMats) return sharedMats;
+  sharedMats = {
+    body: new THREE.MeshStandardMaterial({ color: 0xf2f0e8, roughness: 0.5, metalness: 0.25 }),
+    glass: new THREE.MeshStandardMaterial({ color: 0x14263e, roughness: 0.25, metalness: 0.6 }),
+    trim: new THREE.MeshStandardMaterial({ color: 0x1d3557, roughness: 0.6, metalness: 0.2 }),
+    tyre: new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 }),
+    red: new THREE.MeshStandardMaterial({ color: 0xff2a2a, emissive: 0xff2020, emissiveIntensity: 1 }),
+    blue: new THREE.MeshStandardMaterial({ color: 0x2a6aff, emissive: 0x2040ff, emissiveIntensity: 1 }),
+  };
+  return sharedMats;
+}
+
+function buildCruiser() {
+  const m = cruiserMaterials();
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.75, 4.8), m.body);
+  body.position.y = 0.55;
+  group.add(body);
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.02, 0.22, 4.82), m.trim);
+  stripe.position.y = 0.5;
+  group.add(stripe);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.62, 2.3), m.glass);
+  cabin.position.set(0, 1.2, -0.2);
+  group.add(cabin);
+  const barBase = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.1, 0.5), m.trim);
+  barBase.position.set(0, 1.58, -0.2);
+  group.add(barBase);
+  const red = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.18, 0.42), m.red);
+  red.position.set(-0.42, 1.7, -0.2);
+  group.add(red);
+  const blue = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.18, 0.42), m.blue);
+  blue.position.set(0.42, 1.7, -0.2);
+  group.add(blue);
+  const wheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 12);
+  for (const [wx, wz] of [[-0.95, 1.55], [0.95, 1.55], [-0.95, -1.55], [0.95, -1.55]]) {
+    const wheel = new THREE.Mesh(wheelGeo, m.tyre);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(wx, 0.42, wz);
+    group.add(wheel);
+  }
+  return group;
+}
 
 export function createPolice(scene, world, state, vehicleManager) {
+  const rng = mulberry32((state.seed || 24681357) ^ 0x9e3779b9);
   const units = [];
-  let elapsed = 0;
-  let reportT = -Infinity;
-  let escapeT = 0;
-  let decayT = 0;
-
-  const safeDt = (dt) => Math.min(Math.max(Number.isFinite(dt) ? dt : 0, 0), 0.1);
-
-  const playerPosition = () => {
-    const pos = state?.currentVehicle?.pos ?? state?.player?.pos;
-    return {
-      x: Number.isFinite(pos?.x) ? pos.x : 0,
-      z: Number.isFinite(pos?.z) ? pos.z : 0,
-    };
+  const api = {
+    units,
+    time: 0,
+    lastReportT: -99,
+    escapeT: 0,
+    decayT: 0,
+    flashT: 0,
+    arrestT: 0,
+  };
+  state._policeUnits = units;
+  // Vehicles report theft through this hook; the witnessed rule applies
+  // inside reportCrime, so an unseen car taken at night stays quiet.
+  state._onVehicleTheft = () => {
+    const p = state.player.pos;
+    api.reportCrime('vehicleTheft', { x: p.x, z: p.z }, 30);
   };
 
-  const isInsideBuilding = (x, z) => {
-    for (const building of world?.buildings ?? []) {
-      const hw = (building.w ?? 0) / 2 + 8;
-      const hd = (building.d ?? 0) / 2 + 8;
-      if (x >= building.x - hw && x <= building.x + hw &&
-          z >= building.z - hd && z <= building.z + hd) return true;
-    }
-    return false;
-  };
-
-  const clampPoint = (x, z) => {
-    if (typeof world?.clampToCity === 'function') {
-      const c = world.clampToCity(x, z);
-      if (c && Number.isFinite(c.x) && Number.isFinite(c.z)) return { x: c.x, z: c.z };
-    }
-    const half = (world?.size ?? 1120) / 2;
-    return { x: Math.max(-half, Math.min(half, x)), z: Math.max(-half, Math.min(half, z)) };
-  };
-
-  // Nearest road point at least minDistance from the player, deterministic.
-  function findRoadSpawn(minDistance = 35) {
-    const player = playerPosition();
-    const lines = Array.isArray(world?.roadLines) && world.roadLines.length
-      ? world.roadLines
-      : Array.from({ length: 11 }, (_, i) => -560 + i * 112);
-    const candidates = [];
-    for (const line of lines) {
-      for (let offset = -224; offset <= 224; offset += 28) {
-        candidates.push(clampPoint(line, player.z + offset));
-        candidates.push(clampPoint(player.x + offset, line));
-      }
-    }
-    candidates.sort((a, b) =>
-      Math.hypot(a.x - player.x, a.z - player.z) - Math.hypot(b.x - player.x, b.z - player.z));
-    for (const point of candidates) {
-      if (Math.hypot(point.x - player.x, point.z - player.z) >= minDistance &&
-          !isInsideBuilding(point.x, point.z)) return point;
-    }
-    return null;
-  }
-
-  function removeUnit(unit) {
-    if (!unit) return;
-    const group = unit.group ?? unit.vehicle?.group;
-    if (group && scene?.remove) scene.remove(group);
-    const cars = vehicleManager?.cars;
-    const vehicle = unit.vehicle;
-    if (Array.isArray(cars) && vehicle) {
-      const index = cars.indexOf(vehicle);
-      if (index !== -1) cars.splice(index, 1);
-    }
-    const index = units.indexOf(unit);
-    if (index !== -1) units.splice(index, 1);
-    state.policeUnits = units;
-  }
-
-  // Spawn one cruiser immediately (synchronous, so shot staging works
-  // without running update()).
-  function placeUnit(x, z, heading = 0, index = units.length) {
-    if (typeof vehicleManager?.createCar !== 'function') return null;
-    const vehicle = vehicleManager.createCar('police', x, z, heading);
-    if (!vehicle) return null;
-    vehicle.heading = heading;
-    vehicle.speed = 0;
-    const group = vehicle.group;
-    if (group) {
-      group.position.x = x;
-      group.position.z = z;
-      group.rotation.y = -heading;
-    }
-    const unit = { id: vehicle.id ?? `police-${index}`, vehicle, group, ramT: 0, index };
-    units.push(unit);
-    state.policeUnits = units;
-    return unit;
-  }
-
-  function desiredCount() {
-    const wanted = Math.max(0, Math.min(5, Math.floor(Number(state?.wanted) || 0)));
-    if (wanted === 0) return 0;
-    if (wanted <= 2) return 1;
-    if (wanted === 3) return 2;
+  function desiredCount(level) {
+    if (level <= 0) return 0;
+    if (level <= 2) return 1;
+    if (level === 3) return 2;
     return 3;
   }
 
-  function removeExcess(count) {
-    while (units.length > count) removeUnit(units[units.length - 1]);
+  // Pick a road point near the player, outside the immediate camera view,
+  // never inside a building, never on the beach or ocean edge.
+  function spawnPoint() {
+    const p = state.player.pos;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const a = rng() * Math.PI * 2;
+      const d = 55 + rng() * 30;
+      let x = p.x + Math.sin(a) * d;
+      let z = p.z + Math.cos(a) * d;
+      const nx = nearestLine(x);
+      const nz = nearestLine(z);
+      if (Math.abs(x - nx) <= Math.abs(z - nz)) {
+        x = nx + (rng() < 0.5 ? -4.5 : 4.5);
+      } else {
+        z = nz + (rng() < 0.5 ? -4.5 : 4.5);
+      }
+      x = clamp(x, -610, 610);
+      z = clamp(z, -610, 552);
+      const dist = Math.hypot(x - p.x, z - p.z);
+      if (dist < 35) continue;
+      return { x, z };
+    }
+    const line = nearestLine(p.x + 70);
+    return { x: line + 4.5, z: clamp(p.z, -600, 550) };
   }
 
-  function ensureCount() {
-    const count = desiredCount();
-    removeExcess(count);
-    while (units.length < count) {
-      const point = findRoadSpawn(35);
-      if (!point) break;
-      const player = playerPosition();
-      const heading = Math.atan2(player.x - point.x, -(player.z - point.z));
-      if (!placeUnit(point.x, point.z, heading, units.length)) break;
-    }
-    state.policeUnits = units;
+  function addUnit(x, z, heading) {
+    const group = buildCruiser();
+    group.position.set(x, 0, z);
+    group.rotation.y = -heading;
+    scene.add(group);
+    const unit = {
+      id: units.length, group, x, z, heading, speed: 0,
+      mode: 'chase', stuckT: 0, lastX: x, lastZ: z,
+    };
+    units.push(unit);
+    return unit;
   }
 
-  function setWanted(level) {
-    const wanted = Math.max(0, Math.min(5, Math.floor(Number(level) || 0)));
-    state.wanted = wanted;
-    if (wanted === 0) {
-      removeExcess(0);
-      escapeT = 0;
-      decayT = 0;
-      state.policeUnits = units;
-      return;
-    }
-    const count = wanted <= 2 ? 1 : wanted === 3 ? 2 : 3;
-    removeExcess(count);
-    const player = playerPosition();
-    const heading = Number.isFinite(state?.player?.heading) ? state.player.heading : 0;
-    const forwardX = Math.sin(heading);
-    const forwardZ = -Math.cos(heading);
-    const rightX = Math.cos(heading);
-    const rightZ = Math.sin(heading);
-    while (units.length < count) {
-      const i = units.length;
-      const side = i % 2 ? 5 : -5;
-      const distance = 10 + i * 9;
-      const x = player.x - forwardX * distance + rightX * side;
-      const z = player.z - forwardZ * distance + rightZ * side;
-      if (!placeUnit(x, z, heading, i)) break;
-    }
-    state.policeUnits = units;
+  function removeUnit(unit) {
+    scene.remove(unit.group);
+    const i = units.indexOf(unit);
+    if (i >= 0) units.splice(i, 1);
   }
 
-  function reportCrime(kind, position, witnessRadius = 40) {
-    const validKinds = new Set(['vehicleTheft', 'assault', 'weaponFire', 'attackPolice', 'propertyDamage']);
-    if (!validKinds.has(kind) || elapsed - reportT < 3) return false;
-    const crimePos = position ?? playerPosition();
-    const x = Number.isFinite(crimePos?.x) ? crimePos.x : 0;
-    const z = Number.isFinite(crimePos?.z) ? crimePos.z : 0;
-    const radius = Number.isFinite(witnessRadius) ? Math.max(0, witnessRadius) : 40;
-
-    const policeWitness = units.some((unit) => {
-      const pos = unit.group?.position ?? unit.vehicle?.pos;
-      return pos && Math.hypot(pos.x - x, pos.z - z) <= radius;
-    });
-    let pedestrianWitness = false;
-    const pedestrians = globalThis.window?.__game?.traffic?.pedestrians;
-    if (Array.isArray(pedestrians)) {
-      pedestrianWitness = pedestrians.some((ped) => {
-        const pos = ped?.group?.position;
-        return pos && Math.hypot(pos.x - x, pos.z - z) <= radius * 0.8;
-      });
+  function syncUnits() {
+    const want = desiredCount(state.wanted);
+    while (units.length < want) {
+      const s = spawnPoint();
+      const heading = Math.atan2(state.player.pos.x - s.x, -(state.player.pos.z - s.z));
+      addUnit(s.x, s.z, heading);
     }
-    const witnessed = policeWitness || pedestrianWitness;
-    // A stolen car is reported by its owner even with no witness.
-    if (!witnessed && kind !== 'vehicleTheft') return false;
-
-    const current = Math.max(0, Math.min(5, Math.floor(Number(state.wanted) || 0)));
-    let next = current;
-    if (kind === 'vehicleTheft' || kind === 'assault') next = Math.max(1, current + 1);
-    else if (kind === 'weaponFire') next = Math.max(2, current + 1);
-    else if (kind === 'attackPolice') next = Math.max(3, current + 2);
-    else if (kind === 'propertyDamage') {
-      if (current === 0 || !witnessed) return false;
-      next = current + 1;
+    while (units.length > want) removeUnit(units[units.length - 1]);
+    for (const u of units) {
+      u.group.position.set(u.x, 0, u.z);
+      u.group.rotation.y = -u.heading;
     }
-    if (next === current) return false;
-    reportT = elapsed;
-    escapeT = 0;
-    decayT = 0;
-    setWanted(next);
+  }
+
+  // Spawn (or move) unit `index` at an exact spot. Used by shot staging:
+  // setWanted alone creates meshes, but a frozen shot sim never runs
+  // update(), so staging places cruisers explicitly.
+  function placeUnit(x, z, heading, index) {
+    while (units.length <= index) {
+      const s = spawnPoint();
+      addUnit(s.x, s.z, 0);
+    }
+    const u = units[index];
+    u.x = x; u.z = z; u.heading = heading; u.speed = 0; u.mode = 'chase';
+    u.group.position.set(x, 0, z);
+    u.group.rotation.y = -heading;
+    return u;
+  }
+
+  function witnessNear(position, radius) {
+    for (const ped of readPeds()) {
+      const px = ped.x !== undefined ? ped.x : (ped.mesh ? ped.mesh.position.x : 0);
+      const pz = ped.z !== undefined ? ped.z : (ped.mesh ? ped.mesh.position.z : 0);
+      if (Math.hypot(px - position.x, pz - position.z) <= radius) return true;
+    }
+    for (const u of units) {
+      if (Math.hypot(u.x - position.x, u.z - position.z) <= 60) return true;
+    }
+    return false;
+  }
+
+  function reportCrime(kind, position, witnessRadius) {
+    if (!RAISES[kind]) return false;
+    const pos = position || { x: state.player.pos.x, z: state.player.pos.z };
+    const radius = witnessRadius === undefined ? 30 : witnessRadius;
+    const witnessed = ALWAYS_WITNESSED.has(kind) || witnessNear(pos, radius);
+    if (!witnessed) return false;
+    if (api.time - api.lastReportT < 2.5) return false;
+    api.lastReportT = api.time;
+    api.escapeT = 0;
+    api.decayT = 0;
+    api.setWanted(Math.min(5, state.wanted + RAISES[kind]));
     return true;
   }
 
-  function updateLights(unit) {
-    const group = unit.group;
-    if (!group) return;
-    const phase = Math.floor((Number(state?.timeOfDay) || 0) * 3600 + elapsed);
-    const redOn = phase % 2 === 0;
-    const setLight = (name, on) => {
-      const light = group.getObjectByName?.(name);
-      if (!light?.material) return;
-      const materials = Array.isArray(light.material) ? light.material : [light.material];
-      for (const material of materials) {
-        if ('emissiveIntensity' in material) material.emissiveIntensity = on ? 3 : 0.15;
-      }
-    };
-    setLight('redLight', redOn);
-    setLight('blueLight', !redOn);
-  }
-
-  function update(dt) {
-    const step = safeDt(dt);
-    if (state?.screen !== 'play') return;
-    elapsed += step;
-    ensureCount();
-    const player = playerPosition();
-    let nearby = false;
-
-    for (const unit of units) {
-      const vehicle = unit.vehicle;
-      const group = unit.group ?? vehicle?.group;
-      if (!group) continue;
-      const x = Number.isFinite(vehicle?.pos?.x) ? vehicle.pos.x : group.position.x;
-      const z = Number.isFinite(vehicle?.pos?.z) ? vehicle.pos.z : group.position.z;
-      const dx = player.x - x;
-      const dz = player.z - z;
-      const distance = Math.hypot(dx, dz);
-      if (distance < 60) nearby = true;
-
-      const heading = Math.atan2(dx, -dz);
-      if (vehicle) vehicle.heading = heading;
-      group.rotation.y = -heading;
-
-      let speed = 14;
-      let moveDistance = 0;
-      if (distance > 6) {
-        speed = Math.min(24, 20 + Math.max(0, (state.wanted ?? 1) - 1));
-        moveDistance = speed * step;
-      } else if (distance >= 3.2) {
-        speed = 6;
-        moveDistance = Math.min(speed * step, Math.max(0, distance - 4));
-      } else {
-        speed = 2;
-        unit.ramT = Math.max(0, unit.ramT - step);
-        if (unit.ramT === 0) {
-          const actor = state.currentVehicle?.pos ?? state.player?.pos;
-          if (actor) {
-            actor.x += Math.sin(heading) * 2.2;
-            actor.z -= Math.cos(heading) * 2.2;
-          }
-          unit.ramT = 1.2;
-        }
-      }
-      const nextX = x + Math.sin(heading) * moveDistance;
-      const nextZ = z - Math.cos(heading) * moveDistance;
-      if (vehicle?.pos) {
-        vehicle.pos.x = nextX;
-        vehicle.pos.z = nextZ;
-      }
-      group.position.x = nextX;
-      group.position.z = nextZ;
-      if (vehicle) vehicle.speed = speed;
-      updateLights(unit);
-    }
-
-    if (nearby) {
-      escapeT = 0;
-      decayT = 0;
-    } else if (state.wanted > 0) {
-      escapeT += step;
-      if (escapeT >= 18) {
-        decayT += step;
-        if (decayT >= 12) {
-          decayT -= 12;
-          setWanted(Math.max(0, state.wanted - 1));
-        }
-      }
-    }
-    state.wanted = Math.max(0, Math.min(5, Math.floor(Number(state.wanted) || 0)));
-    state.policeUnits = units;
+  function setWanted(level) {
+    state.wanted = clamp(Math.round(level) || 0, 0, 5);
+    api.escapeT = 0;
+    api.decayT = 0;
+    syncUnits();
+    return state.wanted;
   }
 
   function clear() {
-    removeExcess(0);
+    while (units.length > 0) removeUnit(units[units.length - 1]);
     state.wanted = 0;
-    escapeT = 0;
-    decayT = 0;
-    reportT = -Infinity;
-    state.policeUnits = units;
+    api.escapeT = 0;
+    api.decayT = 0;
+    api.arrestT = 0;
   }
 
-  const police = { units, update, reportCrime, setWanted, clear, placeUnit };
-  state.policeUnits = units;
-  state.police = police;
-  return police;
+  function update(dt) {
+    if (!dt || dt <= 0) dt = 0.016;
+    dt = Math.min(dt, 0.05);
+    api.time += dt;
+    if (state.screen !== 'play') return;
+    syncUnits();
+    const p = state.player.pos;
+    // Light-bar flash, alternating red / blue.
+    api.flashT += dt;
+    const phase = Math.floor(api.flashT / 0.25) % 2 === 0;
+    const mats = cruiserMaterials();
+    mats.red.emissiveIntensity = phase ? 1.6 : 0.25;
+    mats.blue.emissiveIntensity = phase ? 0.25 : 1.6;
+    if (state.wanted <= 0 || units.length === 0) return;
+    let minDist = Infinity;
+    for (const u of units) {
+      const dx = p.x - u.x;
+      const dz = p.z - u.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist < minDist) minDist = dist;
+      // Road-following pursuit: on a single-axis road, travel along it
+      // toward the player's coordinate on that axis; at intersections or
+      // off-road, steer directly at the player.
+      const onNS = Math.abs(u.x - nearestLine(u.x)) < 7;
+      const onEW = Math.abs(u.z - nearestLine(u.z)) < 7;
+      let desired;
+      if (onNS && !onEW) desired = dz < 0 ? 0 : Math.PI;
+      else if (onEW && !onNS) desired = dx < 0 ? -Math.PI / 2 : Math.PI / 2;
+      else desired = Math.atan2(dx, -dz);
+      const turn = clamp(angleDiff(desired, u.heading), -2.4 * dt, 2.4 * dt);
+      u.heading += turn;
+      // Chase speed: full tilt from afar, ease off to a low-speed ram
+      // range up close; never reverse.
+      let target = 26;
+      if (dist < 8) target = 8;
+      else if (dist < 25) target = 18;
+      if (state.currentVehicle) target = Math.min(target, CRUISE_TOP);
+      u.speed += clamp(target - u.speed, -14 * dt, 10 * dt);
+      u.speed = clamp(u.speed, 0, CRUISE_TOP);
+      // Drive FORWARD: velocity (sin h, -cos h). Never backwards.
+      u.x += Math.sin(u.heading) * u.speed * dt;
+      u.z += -Math.cos(u.heading) * u.speed * dt;
+      u.x = clamp(u.x, -612, 612);
+      u.z = clamp(u.z, -612, 556);
+      u.group.position.set(u.x, 0, u.z);
+      u.group.rotation.y = -u.heading;
+      // Stuck detection: barely moved while at speed -> nudge heading.
+      const moved = Math.hypot(u.x - u.lastX, u.z - u.lastZ);
+      if (u.speed > 5 && moved < 0.05) u.stuckT += dt; else u.stuckT = 0;
+      if (u.stuckT > 1.2) {
+        u.heading += Math.PI / 2;
+        u.stuckT = 0;
+      }
+      u.lastX = u.x; u.lastZ = u.z;
+      // Arrest: on-foot player held close by a cruiser.
+      if (state.player.onFoot && dist < 3) {
+        api.arrestT += dt;
+        if (api.arrestT > 2.0) {
+          const fine = Math.min(100, state.player.cash);
+          state.player.cash -= fine;
+          state.player.health = Math.max(25, state.player.health - 10);
+          state._dialogue = { text: `Busted — $${fine} bail paid. Lay low, Nia.`, until: Date.now() + 5000 };
+          api.arrestT = 0;
+          api.clear();
+        }
+      }
+    }
+    if (state.player.onFoot) {
+      let near = false;
+      for (const u of units) if (Math.hypot(u.x - p.x, u.z - p.z) < 3) near = true;
+      if (!near) api.arrestT = 0;
+    } else {
+      api.arrestT = 0;
+    }
+    // Escape: out of search radius for 18 s -> lose one star per 12 s.
+    if (minDist > 90) {
+      api.escapeT += dt;
+      if (api.escapeT > 18) {
+        api.decayT += dt;
+        while (api.decayT >= 12 && state.wanted > 0) {
+          api.decayT -= 12;
+          api.setWanted(state.wanted - 1);
+        }
+      }
+    } else {
+      api.escapeT = 0;
+      api.decayT = 0;
+    }
+  }
+
+  api.update = update;
+  api.reportCrime = reportCrime;
+  api.setWanted = setWanted;
+  api.clear = clear;
+  api.placeUnit = placeUnit;
+  api.getWanted = () => state.wanted;
+  api.witnessNear = witnessNear;
+  return api;
 }

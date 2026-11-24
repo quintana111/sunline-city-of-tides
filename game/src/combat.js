@@ -1,246 +1,267 @@
-// Combat for Sunline: City of Tides — punch (F) + hitscan shoot (LMB).
-// Forward = (sin h, 0, -cos h). No Math.random(). Effects are disposed.
-import * as THREE from 'three';
+// combat.js — punch, hitscan shots, player health for Sunline: City of Tides.
+// Fresh implementation from design-r3.md section 8.
+// F = punch (~2 units in front). Left mouse = hitscan shot with a short
+// muzzle flash. Crime goes through police.reportCrime only.
+import * as THREE from '../vendor/three.min.js';
+
+const PUNCH_RANGE = 2.4;
+const PUNCH_ARC = 0.55; // cosine of the half-angle in front of the player
+const SHOT_RANGE = 42;
+const SHOT_LANE = 3.0; // how close to the shot line a ped must be to count
+const MELEE_COOLDOWN = 0.55;
+const SHOOT_COOLDOWN = 0.45;
+const GRACE_AFTER_HIT = 0.5;
+const DOWN_TIME = 2.5;
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function pointInsideBuilding(world, x, z, margin) {
+  const list = world.colliders || [];
+  for (const c of list) {
+    const hw = (c.hw !== undefined ? c.hw : (c.w || 0) / 2) + margin;
+    const hd = (c.hd !== undefined ? c.hd : (c.d || 0) / 2) + margin;
+    if (Math.abs(x - c.x) < hw && Math.abs(z - c.z) < hd) return true;
+  }
+  return false;
+}
+
+function resolvePoint(world, x, z) {
+  const clear = (px, pz) => px >= -610 && px <= 610 && pz >= -610 && pz <= 556 && !pointInsideBuilding(world, px, pz, 2);
+  if (clear(x, z)) return { x, z };
+  for (let r = 4; r <= 48; r += 4) {
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      if (clear(x + Math.cos(a) * r, z + Math.sin(a) * r)) {
+        return { x: Math.round((x + Math.cos(a) * r) * 10) / 10, z: Math.round((z + Math.sin(a) * r) * 10) / 10 };
+      }
+    }
+  }
+  return { x, z };
+}
+
+function pedPos(ped) {
+  if (ped.x !== undefined && ped.z !== undefined) return { x: ped.x, z: ped.z };
+  if (ped.mesh) return { x: ped.mesh.position.x, z: ped.mesh.position.z };
+  if (ped.group) return { x: ped.group.position.x, z: ped.group.position.z };
+  return { x: 0, z: 0 };
+}
 
 export function createCombat(scene, world, state, police, traffic) {
-  const pedestrianHp = new Map();
-  const downTimers = new Map();
-  const effects = [];
+  let meleeT = 0;
+  let shootT = 0;
+  let graceT = 0;
+  let flashT = 0;
+  let lastF = false;
+  let lastMouse = false;
+  let weapon = 'pistol';
 
-  let punchCooldown = 0;
-  let shootCooldown = 0;
-  let previousPunch = false;
-  let previousShoot = false;
-
-  const safeDt = (dt) => Math.min(Math.max(Number.isFinite(dt) ? dt : 0, 0), 0.1);
-
-  function pedestrians() {
-    if (traffic && Array.isArray(traffic.pedestrians)) return traffic.pedestrians;
-    if (typeof window !== 'undefined') {
-      const fallback = window.__game?.traffic?.pedestrians;
-      if (Array.isArray(fallback)) return fallback;
-    }
+  function readPeds() {
+    if (traffic && Array.isArray(traffic.peds)) return traffic.peds;
+    try {
+      const g = globalThis.__game;
+      if (g && g.traffic && Array.isArray(g.traffic.peds)) return g.traffic.peds;
+    } catch (e) { /* no live game */ }
     return [];
   }
 
-  function playerPosition() {
-    const pos = state?.player?.pos ?? {};
-    return new THREE.Vector3(
-      Number.isFinite(pos.x) ? pos.x : 0,
-      Number.isFinite(pos.y) ? pos.y : 0,
-      Number.isFinite(pos.z) ? pos.z : 0,
-    );
+  // Muzzle flash: a short-lived bright line from the player's hands.
+  const flashGeo = new THREE.BufferGeometry();
+  flashGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const flash = new THREE.Line(
+    flashGeo,
+    new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.95 }),
+  );
+  flash.visible = false;
+  flash.frustumCulled = false;
+  scene.add(flash);
+
+  // Health pickups: green crosses at clear spots, +25 health each.
+  const pickups = [];
+  const pickupSpots = [[-320, 150], [-100, 520], [430, 520]];
+  for (const [sx, sz] of pickupSpots) {
+    const at = resolvePoint(world, sx, sz);
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x2ecc71, emissive: 0x1d8a4c, emissiveIntensity: 0.7, roughness: 0.4 });
+    const white = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xdddddd, emissiveIntensity: 0.4 });
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.25), mat);
+    g.add(box);
+    const barH = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.18, 0.3), white);
+    g.add(barH);
+    const barV = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.6, 0.3), white);
+    g.add(barV);
+    g.position.set(at.x, 1.2, at.z);
+    scene.add(g);
+    pickups.push({ group: g, x: at.x, z: at.z, taken: false, respawnT: 0, spin: 0 });
   }
 
-  function playerHeading() {
-    return Number.isFinite(state?.player?.heading) ? state.player.heading : 0;
-  }
-
-  function forwardVector() {
-    const heading = playerHeading();
-    return new THREE.Vector3(Math.sin(heading), 0, -Math.cos(heading));
-  }
-
-  function addEffect(object, life) {
-    if (!scene?.add || !object) return;
-    scene.add(object);
-    effects.push({ object, life });
-  }
-
-  function removeEffect(effect) {
-    scene?.remove?.(effect.object);
-    effect.object.geometry?.dispose?.();
-    const material = effect.object.material;
-    if (Array.isArray(material)) {
-      for (const item of material) item?.dispose?.();
-    } else {
-      material?.dispose?.();
+  function witnessNear(position, radius) {
+    for (const ped of readPeds()) {
+      const pp = pedPos(ped);
+      if (Math.hypot(pp.x - position.x, pp.z - position.z) <= radius) return true;
     }
+    try {
+      const units = state._policeUnits || [];
+      for (const u of units) if (Math.hypot(u.x - position.x, u.z - position.z) <= 60) return true;
+    } catch (e) { /* no units */ }
+    return false;
   }
 
-  function tickEffects(dt) {
-    for (let i = effects.length - 1; i >= 0; i -= 1) {
-      effects[i].life -= dt;
-      if (effects[i].life <= 0) {
-        removeEffect(effects[i]);
-        effects.splice(i, 1);
+  function knockDown(ped) {
+    ped.down = true;
+    ped.downT = DOWN_TIME;
+    const mesh = ped.mesh || ped.group;
+    if (mesh) mesh.rotation.x = -Math.PI / 2;
+  }
+
+  function scareNearby(position, radius) {
+    for (const ped of readPeds()) {
+      if (ped.down) continue;
+      const pp = pedPos(ped);
+      const d = Math.hypot(pp.x - position.x, pp.z - position.z);
+      if (d <= radius && d > 0.01) {
+        ped.flee = true;
+        ped.fleeT = 4;
+        ped.fx = pp.x + ((pp.x - position.x) / d) * 22;
+        ped.fz = pp.z + ((pp.z - position.z) / d) * 22;
       }
     }
   }
 
-  function tickDowned(dt) {
-    for (const [ped, timer] of downTimers) {
-      const next = timer - dt;
-      if (next <= 0) {
-        downTimers.delete(ped);
-        pedestrianHp.set(ped, 100);
-        if (ped?.group) ped.group.rotation.x = 0;
-        if (ped && Number.isFinite(ped.fleeTimer)) ped.fleeTimer = Math.max(ped.fleeTimer, 4);
-      } else {
-        downTimers.set(ped, next);
-      }
+  function punch() {
+    if (meleeT > 0) return false;
+    meleeT = MELEE_COOLDOWN;
+    weapon = 'fists';
+    const p = state.player.pos;
+    const fx = Math.sin(state.player.heading);
+    const fz = -Math.cos(state.player.heading);
+    let hit = null;
+    let bestD = Infinity;
+    for (const ped of readPeds()) {
+      if (ped.down) continue;
+      const pp = pedPos(ped);
+      const dx = pp.x - p.x;
+      const dz = pp.z - p.z;
+      const d = Math.hypot(dx, dz);
+      if (d > PUNCH_RANGE || d < 0.01) continue;
+      if ((dx * fx + dz * fz) / d < PUNCH_ARC) continue;
+      if (d < bestD) { bestD = d; hit = ped; }
     }
-  }
-
-  function makePunchEffect() {
-    const position = playerPosition();
-    const forward = forwardVector();
-    const heading = playerHeading();
-    const geometry = new THREE.BoxGeometry(0.9, 0.035, 0.32);
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xffe7a3, transparent: true, opacity: 0.58, depthWrite: false,
-    });
-    const arc = new THREE.Mesh(geometry, material);
-    arc.position.set(position.x + forward.x * 1.35, position.y + 1.05, position.z + forward.z * 1.35);
-    arc.rotation.y = -heading;
-    addEffect(arc, 0.15);
-  }
-
-  function getPedestrians() {
-    return pedestrians().filter((ped) => ped?.group?.position);
-  }
-
-  function isDown(ped) {
-    return downTimers.has(ped);
-  }
-
-  function damagePedestrian(ped, amount) {
-    if (!ped || isDown(ped)) return;
-    const hp = pedestrianHp.has(ped) ? pedestrianHp.get(ped) : 100;
-    const nextHp = hp - amount;
-    pedestrianHp.set(ped, nextHp);
-    const forward = forwardVector();
-    // Small shove: a full 1.5-unit knockback pushes the ped out of the
-    // 2.2-unit punch range, so repeated punches could never knock one down.
-    ped.group.position.x += forward.x * 0.3;
-    ped.group.position.z += forward.z * 0.3;
-    if (nextHp <= 0) {
-      downTimers.set(ped, 4);
-      ped.group.rotation.x = -Math.PI / 2;
-      ped.fleeTimer = 4;
+    if (hit) {
+      knockDown(hit);
+      scareNearby(p, 10);
+      if (police && police.reportCrime) police.reportCrime('assault', { x: p.x, z: p.z }, 25);
     }
-  }
-
-  function findPunchTarget(position, forward) {
-    let nearest = null;
-    let nearestDistance = Infinity;
-    const minDot = Math.cos((100 * Math.PI) / 360);
-    for (const ped of getPedestrians()) {
-      if (isDown(ped)) continue;
-      const pedPosition = ped.group.position;
-      const dx = pedPosition.x - position.x;
-      const dz = pedPosition.z - position.z;
-      const distance = Math.hypot(dx, dz);
-      if (distance > 2.2 || distance <= 0) continue;
-      const dot = (dx * forward.x + dz * forward.z) / distance;
-      if (dot < minDot || distance >= nearestDistance) continue;
-      nearest = ped;
-      nearestDistance = distance;
-    }
-    return nearest;
+    return !!hit;
   }
 
   function shoot() {
-    const position = playerPosition();
-    const forward = forwardVector();
-    const muzzle = new THREE.Vector3(
-      position.x + forward.x * 0.35,
-      position.y + 1.4,
-      position.z + forward.z * 0.35,
-    );
-    const maxRange = 40;
-    let hitPed = null;
-    let hitDistance = maxRange;
-
-    for (const ped of getPedestrians()) {
-      if (isDown(ped)) continue;
-      const p = ped.group.position;
-      const target = new THREE.Vector3(p.x, p.y + 1, p.z);
-      const offset = target.sub(muzzle);
-      const along = offset.dot(forward);
-      if (along < 0 || along > maxRange) continue;
-      const closest = muzzle.clone().addScaledVector(forward, along);
-      const perpendicular = closest.distanceTo(target);
-      if (perpendicular <= 1.2 && along < hitDistance) {
-        hitDistance = along;
-        hitPed = ped;
-      }
+    if (shootT > 0) return false;
+    shootT = SHOOT_COOLDOWN;
+    weapon = 'pistol';
+    const p = state.player.pos;
+    const fx = Math.sin(state.player.heading);
+    const fz = -Math.cos(state.player.heading);
+    // Muzzle flash line, 1.2 -> 3.2 units ahead, gone in ~60 ms.
+    const pos = flashGeo.attributes.position.array;
+    pos[0] = p.x + fx * 1.2; pos[1] = 1.35; pos[2] = p.z + fz * 1.2;
+    pos[3] = p.x + fx * 3.2; pos[4] = 1.35; pos[5] = p.z + fz * 3.2;
+    flashGeo.attributes.position.needsUpdate = true;
+    flash.visible = true;
+    flashT = 0.06;
+    let hit = null;
+    let bestD = Infinity;
+    for (const ped of readPeds()) {
+      if (ped.down) continue;
+      const pp = pedPos(ped);
+      const dx = pp.x - p.x;
+      const dz = pp.z - p.z;
+      const along = dx * fx + dz * fz;
+      if (along < 0 || along > SHOT_RANGE) continue;
+      const side = Math.abs(dx * fz - dz * fx);
+      if (side > SHOT_LANE) continue;
+      if (along < bestD) { bestD = along; hit = ped; }
     }
-
-    const end = muzzle.clone().addScaledVector(forward, hitDistance);
-    if (hitPed) damagePedestrian(hitPed, 50);
-
-    const lineGeometry = new THREE.BufferGeometry().setFromPoints([muzzle, end]);
-    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffe4a3, transparent: true, opacity: 0.9 });
-    addEffect(new THREE.Line(lineGeometry, lineMaterial), 0.06);
-
-    const flashGeometry = new THREE.SphereGeometry(0.075, 8, 6);
-    const flashMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffd36a, emissive: 0xff8a1c, emissiveIntensity: 2, transparent: true, opacity: 0.95,
-    });
-    const flash = new THREE.Mesh(flashGeometry, flashMaterial);
-    flash.position.copy(muzzle);
-    addEffect(flash, 0.06);
-
-    police?.reportCrime?.('weaponFire', position, 60);
-  }
-
-  function update(dt, input) {
-    const step = safeDt(dt);
-    const keys = input?.keys instanceof Set ? input.keys : state?.input?.keys;
-    const buttons = input?.mouseButtons instanceof Set ? input.mouseButtons : state?.input?.mouseButtons;
-    const punchHeld = keys instanceof Set && keys.has('KeyF');
-    const shootHeld = buttons instanceof Set && buttons.has(0);
-    const punchPressed = punchHeld && !previousPunch;
-    previousPunch = punchHeld;
-    previousShoot = shootHeld;
-
-    if (state?.screen !== 'play' || state?.paused) return;
-
-    punchCooldown = Math.max(0, punchCooldown - step);
-    shootCooldown = Math.max(0, shootCooldown - step);
-    tickEffects(step);
-    tickDowned(step);
-
-    if (state?.currentVehicle || state?.player?.onFoot === false) return;
-
-    if (punchPressed && punchCooldown <= 0) {
-      punchCooldown = 0.6;
-      makePunchEffect();
-      const position = playerPosition();
-      const target = findPunchTarget(position, forwardVector());
-      if (target) {
-        damagePedestrian(target, 34);
-        police?.reportCrime?.('assault', position, 40);
-      }
+    if (hit) {
+      knockDown(hit);
+      scareNearby(p, 14);
+    } else {
+      scareNearby(p, 8);
     }
-
-    if (shootHeld && shootCooldown <= 0) {
-      shootCooldown = 0.35;
-      shoot();
-    }
+    if (police && police.reportCrime) police.reportCrime('weaponFire', { x: p.x, z: p.z }, 40);
+    return !!hit;
   }
 
   function damagePlayer(amount, source) {
-    if (state?.screen !== 'play') return state?.player?.health ?? 0;
-    const current = Number.isFinite(state?.player?.health) ? state.player.health : 100;
-    const damage = Number.isFinite(amount) ? amount : 0;
-    const health = Math.min(100, Math.max(0, current - damage));
-    state.player.health = health;
-    if (health <= 0) state.screen = 'over';
-    return health;
+    if (graceT > 0) return state.player.health;
+    if (state.player.health <= 0) return 0;
+    graceT = GRACE_AFTER_HIT;
+    state.player.health = clamp(state.player.health - amount, 0, 100);
+    if (state.player.health <= 0) {
+      state.screen = 'over';
+      state._dialogue = { text: 'Nia is down. A cut of the cash is gone — recover and go again.', until: Date.now() + 6000 };
+    }
+    return state.player.health;
   }
 
   function getWeaponState() {
-    const driving = !!state?.currentVehicle || state?.player?.onFoot === false;
-    return {
-      weapon: 'fists',
-      punchCooldown,
-      shootCooldown,
-      canPunch: !driving && state?.screen === 'play' && !state?.paused && punchCooldown <= 0,
-      canShoot: !driving && state?.screen === 'play' && !state?.paused && shootCooldown <= 0,
-    };
+    return { weapon, ammo: Infinity, shootCooldown: Math.max(0, shootT), meleeCooldown: Math.max(0, meleeT) };
   }
 
-  return { update, damagePlayer, getWeaponState };
+  function update(dt, input) {
+    if (!dt || dt <= 0) dt = 0.016;
+    dt = Math.min(dt, 0.05);
+    meleeT = Math.max(0, meleeT - dt);
+    shootT = Math.max(0, shootT - dt);
+    graceT = Math.max(0, graceT - dt);
+    if (flashT > 0) {
+      flashT -= dt;
+      if (flashT <= 0) flash.visible = false;
+    }
+    // Knocked-down peds get back up.
+    for (const ped of readPeds()) {
+      if (ped.down && ped.downT !== undefined) {
+        ped.downT -= dt;
+        if (ped.downT <= 0) {
+          ped.down = false;
+          const mesh = ped.mesh || ped.group;
+          if (mesh) mesh.rotation.x = 0;
+        }
+      }
+    }
+    // Pickups: slow spin + bob, collect on approach, respawn after 90 s.
+    for (const pk of pickups) {
+      pk.spin += dt;
+      if (pk.taken) {
+        pk.respawnT -= dt;
+        if (pk.respawnT <= 0) {
+          pk.taken = false;
+          pk.group.visible = true;
+        }
+        continue;
+      }
+      pk.group.rotation.y = pk.spin;
+      pk.group.position.y = 1.2 + Math.sin(pk.spin * 2) * 0.15;
+      const d = Math.hypot(state.player.pos.x - pk.x, state.player.pos.z - pk.z);
+      if (d < 2.2 && state.player.health < 100) {
+        state.player.health = clamp(state.player.health + 25, 0, 100);
+        pk.taken = true;
+        pk.respawnT = 90;
+        pk.group.visible = false;
+        state._dialogue = { text: '+25 health. Patch up and keep moving.', until: Date.now() + 3000 };
+      }
+    }
+    if (state.screen !== 'play') return;
+    if (state.player.onFoot === false) return; // no shooting while driving
+    const inp = input || state.input || {};
+    const keys = inp.keys;
+    const fHeld = keys && typeof keys.has === 'function' ? keys.has('KeyF') : false;
+    if (fHeld && !lastF) punch();
+    lastF = fHeld;
+    const mouse = inp.mouseButtons;
+    const mHeld = mouse && typeof mouse.has === 'function' ? mouse.has(0) : false;
+    if (mHeld && !lastMouse) shoot();
+    lastMouse = mHeld;
+  }
+
+  return { update, damagePlayer, getWeaponState, punch, shoot, pickups };
 }

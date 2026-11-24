@@ -1,306 +1,191 @@
-// Deterministic screenshot staging for Sunline: City of Tides (?shot=).
-// All staging is synchronous — main.js freezes the sim in shot mode, so the
-// frame captured is exactly the staged one. Seed 731942, no Math.random().
-// Forward = (sin h, 0, -cos h); mesh rotation.y = -heading.
-import * as THREE from 'three';
+// shots.js — deterministic ?shot= staging for Sunline: City of Tides.
+// Fresh implementation from design-r3.md sections 12 and 14.
+// applyShot(name, context) -> true when the name is recognised, else false.
+// The shot-mode sim is FROZEN: update() never runs, so every staged value
+// (car, player pos/heading, wanted, mission, camera) is set synchronously
+// here. Cars are placed with placePlayerInCar / setCarPosition, which sync
+// state.player.pos/heading to the car — that is what keeps the minimap
+// arrow honest in a frozen frame.
+const EAST = Math.PI / 2;
 
-function placeCameraBehind(camera, targetPos, heading, dist, height, lookAhead) {
-  const forwardX = Math.sin(heading);
-  const forwardZ = -Math.cos(heading);
-  camera.position.set(
-    targetPos.x - forwardX * dist,
-    targetPos.y + height,
-    targetPos.z - forwardZ * dist,
-  );
-  camera.lookAt(
-    targetPos.x + forwardX * lookAhead,
-    targetPos.y + 1.5,
-    targetPos.z + forwardZ * lookAhead,
-  );
+function setCam(camera, x, y, z, lx, ly, lz) {
+  if (!camera) return;
+  if (camera.position && camera.position.set) camera.position.set(x, y, z);
+  if (camera.lookAt) camera.lookAt(lx, ly, lz);
 }
 
-function setGroupPosition(group, x, y, z) {
-  if (group?.position?.set) group.position.set(x, y, z);
-}
-
-function setCarPosition(car, x, z, heading, state) {
-  if (!car) return;
-  if (car.pos && typeof car.pos === 'object') {
-    car.pos.x = x;
-    car.pos.y = Number.isFinite(car.pos.y) ? car.pos.y : 0;
-    car.pos.z = z;
-  } else {
-    car.pos = { x, y: 0, z };
-  }
-  car.heading = heading;
-  setGroupPosition(car.group, x, 0, z);
-  if (car.group?.rotation) car.group.rotation.y = -heading;
-  // Keep the shared player position on the car: in shot mode the sim is
-  // frozen, so vehicles.update() never runs its per-frame sync and
-  // state.player.pos would stay stale at (0,0) — the minimap arrow and
-  // anything reading the player position would point at the city centre.
-  if (state?.player?.pos) {
-    state.player.pos.x = x;
-    state.player.pos.y = 0;
-    state.player.pos.z = z;
-    state.player.heading = heading;
-  }
-}
-
-function setTrafficCar(entry, x, z, heading) {
-  if (!entry) return;
-  setGroupPosition(entry.group, x, 0, z);
-  if (entry.group?.rotation) entry.group.rotation.y = -heading;
-  entry.heading = heading;
-}
-
-function setPedestrian(entry, x, z) {
-  if (!entry) return;
-  setGroupPosition(entry.group, x, 0, z);
-}
-
-// Sync a police unit's mesh AND its vehicle record (police.update reads
-// vehicle.pos; the mesh position is what the camera sees).
-function positionPoliceUnit(unit, x, z, heading) {
-  if (!unit) return;
-  const group = unit.group ?? unit.vehicle?.group;
-  const vehicle = unit.vehicle;
-  if (vehicle?.pos && typeof vehicle.pos === 'object') {
-    vehicle.pos.x = x;
-    vehicle.pos.z = z;
-  }
-  if (unit.pos && typeof unit.pos === 'object') {
-    unit.pos.x = x;
-    unit.pos.z = z;
-  } else {
-    unit.pos = { x, y: 0, z };
-  }
-  if (vehicle) vehicle.heading = heading;
-  unit.heading = heading;
-  setGroupPosition(group, x, 0, z);
-  if (group?.rotation) group.rotation.y = -heading;
-}
-
-function setPlayerOnFoot(state, player, vehicles, x, z, heading) {
+function exitIfDriving(state, vehicles) {
   try {
-    if (state.currentVehicle) vehicles?.exitVehicle?.();
-  } catch {
-    // State is still staged below.
+    if (state.currentVehicle && vehicles && typeof vehicles.exitVehicle === 'function') {
+      vehicles.exitVehicle();
+    }
+  } catch (e) { /* already on foot */ }
+}
+
+function placeCarInShot(state, vehicles, model, x, z, heading) {
+  exitIfDriving(state, vehicles);
+  let car = null;
+  if (vehicles && typeof vehicles.placePlayerInCar === 'function') {
+    car = vehicles.placePlayerInCar(model, x, z, heading, 0);
   }
-  try {
-    if (player?.setPosition) player.setPosition(x, z);
-  } catch {
-    // State is still staged below.
+  if (!car && vehicles && typeof vehicles.spawnCarAt === 'function') {
+    car = vehicles.spawnCarAt(model, x, z, heading);
+    if (car && vehicles.setCarPosition) vehicles.setCarPosition(car, x, z, heading, state);
+    if (car && vehicles.enterVehicle) vehicles.enterVehicle(car.id);
   }
-  state.currentVehicle = null;
-  state.player.onFoot = true;
-  state.player.pos = state.player.pos || { x: 0, y: 0, z: 0 };
+  return car;
+}
+
+function placePlayerOnFoot(state, player, x, z, heading) {
+  exitIfDriving(state, { exitVehicle: () => {} });
   state.player.pos.x = x;
+  state.player.pos.y = 0;
   state.player.pos.z = z;
   state.player.heading = heading;
-}
-
-function preparePlay(state) {
-  state.screen = 'play';
-  state.paused = false;
-  state.input = state.input || {};
-  state.input.keys = state.input.keys instanceof Set ? state.input.keys : new Set();
-  state.input.keys.clear();
-  state.input.mouseDX = 0;
-  state.input.mouseDY = 0;
-}
-
-function finishPlayShot(state) {
-  state.timeOfDay = 17.25;
-  try {
-    if (typeof window !== 'undefined') window.__shotReady = false;
-  } catch {
-    // The shot-ready flag is browser-only.
+  state.player.onFoot = true;
+  state.currentVehicle = null;
+  if (player && player.group) {
+    player.group.position.set(x, 0, z);
+    player.group.rotation.y = -heading;
   }
 }
 
-function addFallbackBeacon(scene, x, z) {
-  if (!scene) return;
-  const beacon = new THREE.Group();
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xf2c94c, emissive: 0x79520d, emissiveIntensity: 0.35,
-  });
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.45, 10), material);
-  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.42, 0.85, 10), material);
-  base.position.y = 0.28;
-  tip.position.y = 0.9;
-  beacon.add(base, tip);
-  beacon.position.set(x, 0, z);
-  scene.add(beacon);
+function moveTrafficCar(traffic, i, x, z, heading) {
+  const car = traffic && traffic.cars ? traffic.cars[i] : null;
+  if (!car) return;
+  car.x = x;
+  car.z = z;
+  car.heading = heading;
+  car.speed = 0;
+  if (car.mesh) {
+    car.mesh.position.set(x, 0, z);
+    car.mesh.rotation.y = -heading;
+  }
+}
+
+function movePed(traffic, i, x, z, heading) {
+  const ped = traffic && traffic.peds ? traffic.peds[i] : null;
+  if (!ped) return null;
+  ped.x = x;
+  ped.z = z;
+  if (heading !== undefined) ped.heading = heading;
+  if (ped.mesh) {
+    ped.mesh.position.set(x, 0, z);
+    if (heading !== undefined) ped.mesh.rotation.y = -heading;
+  }
+  return ped;
+}
+
+function playScreen(state) {
+  state.screen = 'play';
+  state.paused = false;
+  state.timeOfDay = 17.25;
 }
 
 export function applyShot(name, context) {
-  try {
-    const { state, world, player, vehicles, traffic, police, missions, camera, scene } =
-      context || {};
-    if (!state || !camera) return false;
+  const { state, world, player, vehicles, traffic, police, missions, camera } = context || {};
+  if (!state || !name) return false;
+  state._dialogue = null;
 
-    if (name === 'start') {
-      state.screen = 'title';
-      state.paused = false;
-      state.wanted = 0;
-      // From over the ocean looking north-west: teal water in the
-      // foreground, beach + palms + marina mid-frame, Glassline towers
-      // rising beyond — the coastal-city postcard. Tower tops clear the
-      // title card into the top strip; the coast reads at the frame edges
-      // and below the card.
-      camera.position.set(250, 60, 850);
-      camera.lookAt(-80, 62, -100);
-      return true;
-    }
-
-    if (name === 'drive') {
-      preparePlay(state);
-      state.wanted = 0;
-      const car = vehicles.createCar('sports', -80, 4.5, Math.PI / 2);
-      vehicles.enterVehicle(car);
-      car.speed = 14;
-      setCarPosition(car, -80, 4.5, Math.PI / 2, state);
-      const trafficCars = traffic?.cars || [];
-      const spots = [
-        [car.pos.x + 28, 4.5],
-        [car.pos.x + 52, -4.5],
-        [car.pos.x + 78, 4.5],
-      ];
-      for (let i = 0; i < Math.min(3, trafficCars.length); i++) {
-        setTrafficCar(trafficCars[i], spots[i][0], spots[i][1], Math.PI / 2);
-      }
-      placeCameraBehind(camera, car.pos, Math.PI / 2, 11, 3.2, 8);
-      finishPlayShot(state);
-      return true;
-    }
-
-    if (name === 'chase') {
-      preparePlay(state);
-      // Player car first, so setWanted's spawn offsets are relative to it.
-      const playerX = -40;
-      const car = vehicles.createCar('sports', playerX, 4.5, Math.PI / 2);
-      vehicles.enterVehicle(car);
-      car.speed = 16;
-      setCarPosition(car, playerX, 4.5, Math.PI / 2, state);
-      police?.setWanted?.(3);
-      state.wanted = 3;
-
-      // Deterministic cruiser placement: trailing 6 behind / 5 left (north
-      // lane) so the pursuit reads unmistakably, second 26 ahead. Never
-      // reassign police.units (state.policeUnits holds the same array).
-      const positions = [
-        [playerX - 6, -4.5],
-        [playerX + 14, -4.5],
-      ];
-      for (let i = 0; i < 2; i++) {
-        if (police && Array.isArray(police.units)) {
-          if (!police.units[i]) {
-            const cruiser = vehicles.createCar('police', positions[i][0], positions[i][1], Math.PI / 2);
-            police.units.push({ vehicle: cruiser, group: cruiser.group, ramT: 0, index: i });
-          }
-          positionPoliceUnit(police.units[i], positions[i][0], positions[i][1], Math.PI / 2);
-        } else {
-          const cruiser = vehicles.createCar('police', positions[i][0], positions[i][1], Math.PI / 2);
-          setCarPosition(cruiser, positions[i][0], positions[i][1], Math.PI / 2);
-        }
-      }
-
-      // Chase view from behind, pulled back and offset to the south side so
-      // the trailing north-lane cruiser stays well inside the frame; the
-      // lookAt sits west of the player car so the car lands right-of-centre,
-      // clear of the centred "E — Exit vehicle" prompt. Closer and lower
-      // than the first pass so both cruisers and the player car read bigger
-      // and less foreground road sits empty.
-      camera.position.set(playerX - 14, 7.5, 16);
-      camera.lookAt(playerX - 2, 1.2, -1);
-      finishPlayShot(state);
-      return true;
-    }
-
-    if (name === 'mission') {
-      preparePlay(state);
-      state.wanted = 0;
-      if (missions?.startMission) {
-        missions.startMission('first-light');
-      } else {
-        state.mission = {
-          id: 'first-light',
-          title: 'First Light Run',
-          objective: 'Pick up the parcel — Parcel Pickup',
-          stage: 0,
-          timeLeft: 150,
-        };
-        const pickup = world?.missionPoints?.parcelPickup || { x: -4.5, z: -112 };
-        addFallbackBeacon(scene, pickup.x, pickup.z);
-      }
-      const pickup = world?.missionPoints?.parcelPickup || { x: -112, z: -124 };
-      // Nia stands 4 units west of the pickup so she is visible NEXT TO the
-      // beacon instead of hidden inside it (the beacon is at her exact
-      // target point and taller than she is).
-      setPlayerOnFoot(state, player, vehicles, pickup.x - 4, pickup.z, Math.PI / 2);
-      // Parked car 12 units EAST of the pickup on the same road so the
-      // beacon never sits inside the car — and so the low mission camera
-      // does not crop it into a giant corner blob (it did at +12 south).
-      vehicles.createCar('sports', pickup.x + 12, pickup.z, Math.PI / 2);
-      // Two traffic cars on the pickup's own north-south road (x = -112),
-      // heading north, so they are actually in frame.
-      const trafficCars = traffic?.cars || [];
-      if (trafficCars[0]) setTrafficCar(trafficCars[0], -116.5, pickup.z + 28, 0);
-      if (trafficCars[1]) setTrafficCar(trafficCars[1], -107.5, pickup.z + 52, 0);
-      // Lower and closer than the first pass (~18 units) so the player +
-      // beacon pair is legible at a glance, still in the upper half of the
-      // frame, clear of the centred prompt and dialogue.
-      camera.position.set(pickup.x - 11, 8.5, pickup.z + 14);
-      camera.lookAt(pickup.x - 2, 1.8, pickup.z - 2);
-      finishPlayShot(state);
-      return true;
-    }
-
-    if (name === 'street') {
-      preparePlay(state);
-      state.wanted = 0;
-      setPlayerOnFoot(state, player, vehicles, 0, 24, Math.PI / 2);
-      const pedestrians = traffic?.pedestrians || [];
-      const pedSpots = [[-8, 16], [-4, 20], [0, 17], [4, 20], [8, 16]];
-      for (let i = 0; i < Math.min(5, pedestrians.length); i++) {
-        setPedestrian(pedestrians[i], pedSpots[i][0], pedSpots[i][1]);
-      }
-      vehicles.createCar('taxi', 14, 4.5, Math.PI / 2);
-      const trafficCars = traffic?.cars || [];
-      if (trafficCars[0]) setTrafficCar(trafficCars[0], 30, 4.5, Math.PI / 2);
-      if (trafficCars[1]) setTrafficCar(trafficCars[1], 44, -4.5, Math.PI / 2);
-      if (trafficCars[2]) setTrafficCar(trafficCars[2], 58, 4.5, Math.PI / 2);
-      // Close on Nia: she is ~4.5 units from the lens, peds 6 ahead of her,
-      // so the on-foot action (not empty pavement) is the focus.
-      camera.position.set(3, 3, 28.5);
-      camera.lookAt(0, 1.2, 10);
-      finishPlayShot(state);
-      return true;
-    }
-
-    if (name === 'combat') {
-      preparePlay(state);
-      state.wanted = 0;
-      setPlayerOnFoot(state, player, vehicles, 0, 24, Math.PI / 2);
-      const pedestrian = traffic?.pedestrians?.[0];
-      if (pedestrian) {
-        setPedestrian(pedestrian, 1.8, 24);
-        if (pedestrian.group?.rotation) pedestrian.group.rotation.x = -Math.PI / 2;
-      }
-      camera.position.set(5, 4, 32);
-      camera.lookAt(0, 1.2, 22);
-      finishPlayShot(state);
-      return true;
-    }
-
-    return false;
-  } catch (error) {
-    try {
-      console.warn('Unable to stage screenshot shot:', name, error);
-    } catch {
-      // Ignore logging failures.
-    }
-    return false;
+  if (name === 'start') {
+    state.screen = 'title';
+    state.paused = false;
+    state.timeOfDay = 17.25;
+    state.wanted = 0;
+    state.mission = { id: null, title: '', objective: '', stage: 0 };
+    // Proven framing: from over the ocean looking NW — teal ocean in the
+    // foreground, beach + palms + docks at the sides, city band mid-frame.
+    setCam(camera, 250, 60, 850, -80, 62, -100);
+    return true;
   }
+
+  if (name === 'drive') {
+    playScreen(state);
+    state.wanted = 0;
+    if (police && police.clear) police.clear();
+    if (missions && missions.resetMission) missions.resetMission();
+    // Kestrel R on Seaglass Boulevard in Glassline, eastbound lane.
+    const car = placeCarInShot(state, vehicles, 'Kestrel R', -40, 4.5, EAST);
+    if (!car) return false;
+    // Traffic ahead and nearby so the street reads as alive.
+    moveTrafficCar(traffic, 0, -15, 4.5, EAST);
+    moveTrafficCar(traffic, 1, 5, 4.5, EAST);
+    moveTrafficCar(traffic, 2, 28, 4.5, EAST);
+    moveTrafficCar(traffic, 3, 20, -4.5, -EAST);
+    // Chase view from behind the car.
+    setCam(camera, -52, 5, 8, -32, 1.5, 4.5);
+    return true;
+  }
+
+  if (name === 'chase') {
+    playScreen(state);
+    if (missions && missions.resetMission) missions.resetMission();
+    // Kestrel R on the broad central road, eastbound; wanted 3.
+    const car = placeCarInShot(state, vehicles, 'Kestrel R', -40, 4.5, EAST);
+    if (!car) return false;
+    if (police && police.setWanted) police.setWanted(3);
+    else state.wanted = 3;
+    // Cruisers BEHIND the player on valid road lanes, outside collision
+    // range, both heading east in pursuit.
+    if (police && police.placeUnit) {
+      police.placeUnit(-56, 4.5, EAST, 0);
+      police.placeUnit(-70, -4.5, EAST, 1);
+    }
+    state.wanted = 3;
+    // Proven cover framing: closer / lower, trailing cruiser mid-left.
+    const px = state.player.pos.x;
+    setCam(camera, px - 44, 14, -14, px + 6, 1.2, 2);
+  if (state.currentVehicle) state.currentVehicle.speed = 16; // staged chase speed (58 km/h)
+    return true;
+  }
+
+  if (name === 'mission') {
+    playScreen(state);
+    state.wanted = 0;
+    if (police && police.clear) police.clear();
+    // Spec position: [-8, -112], on foot at a central intersection.
+    placePlayerOnFoot(state, player, -8, -112, -0.5);
+    if (missions && missions.startMission) missions.startMission('first-light');
+    state._dialogue = { text: 'First Light Run: a sealed parcel, Palm Court to the beachfront cafe. 150 seconds. Go.', until: Date.now() + 9000 };
+    // Three-quarter view: player centred, Glassline rising behind.
+    setCam(camera, -2, 6, -96, -8, 1.5, -112);
+    return true;
+  }
+
+  if (name === 'street') {
+    playScreen(state);
+    state.wanted = 0;
+    if (police && police.clear) police.clear();
+    if (missions && missions.resetMission) missions.resetMission();
+    // On foot on the north sidewalk of the -112 road, peds + traffic near.
+    placePlayerOnFoot(state, player, 14, -100, Math.PI * 0.9);
+    movePed(traffic, 0, 6, -100.5, 0);
+    movePed(traffic, 1, 20, -100.5, Math.PI);
+    movePed(traffic, 2, -6, -100.5, 0);
+    moveTrafficCar(traffic, 0, -30, -107.5, EAST);
+    moveTrafficCar(traffic, 1, 12, -116.5, -EAST);
+    setCam(camera, 20, 3, -92, 8, 1.5, -104);
+    return true;
+  }
+
+  if (name === 'combat') {
+    playScreen(state);
+    state.wanted = 0;
+    if (police && police.clear) police.clear();
+    if (missions && missions.resetMission) missions.resetMission();
+    // Face-off on foot: the nearest ped knocked flat beside Nia.
+    placePlayerOnFoot(state, player, 14, -100, Math.PI / 2);
+    const ped = movePed(traffic, 0, 17, -98, 0);
+    if (ped && ped.mesh) {
+      ped.mesh.rotation.x = -Math.PI / 2;
+      ped.down = true;
+      ped.downT = 999;
+    }
+    movePed(traffic, 1, 6, -100.5, 0);
+    moveTrafficCar(traffic, 0, -30, -107.5, EAST);
+    setCam(camera, 21, 4.5, -90, 13, 1.2, -100);
+    return true;
+  }
+
+  return false;
 }

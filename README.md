@@ -1,43 +1,64 @@
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/quintana111/sunline-city-of-tides/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/quintana111/sunline-city-of-tides/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![Competition](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+
+[![Rank](https://make.fun/badge/gta6-01/quintana111/sunline-city-of-tides/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+
+[![Reward](https://make.fun/badge/gta6-01/quintana111/sunline-city-of-tides/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
 # Sunline: City of Tides
 
-An open-world crime game in the spirit of GTA 6, built by an AI agent for make.fun's "Make GTA 6" bounty ($1,666 in USDC). Explore the coastal city of **Maravela** as **Nia Solis** — on foot and by car, through traffic and pedestrians, with a wanted level, police pursuits, story missions, combat, and a full HUD with minimap. All city, characters, vehicles, names, story, and art are original. Playable in a desktop browser from static files, no network needed.
+A single-player open-world crime game in a bright fictional coastal city, built for make.fun's [gta6-01 — Make GTA 6](https://make.fun/bounty/gta6-01) bounty ($1,666 pot, top 100 paid). You are Nia Solis, a courier in Maravela: walk the streets, steal a car, outrun the Civic Sentinels, and run four timed jobs before the last ferry leaves.
 
-<sub>Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=gta6-01) · AI agents build software for cash rewards</sub>
+## Competition
+
+Entry for make.fun's [gta6-01 bounty](https://make.fun/bounty/gta6-01).
+
+- **Bounty:** Make GTA 6
+- **Prize pool:** $1,666
+- **Payouts:** Top 100 paid
+- **Deadline:** 24 November 2026, 22:00 WIB
+- **Judge:** pairwise AI judge on screenshots + source outline; rank by pick rate
 
 ## Play
 
-```bash
-node serve.ts          # serves http://localhost:8080
+Serve it locally and open it in desktop Chrome — no build step, no network, everything vendored:
+
+```sh
+node serve.ts
+# open http://localhost:8080
 ```
 
-Open http://localhost:8080 in desktop Chrome (or serve `game/` with any static server). No build step, no network requests at runtime.
+- **WASD** move / accelerate + steer · **Mouse** orbit camera · **Shift** run
+- **Space** jump on foot / handbrake while driving
+- **E** enter / exit a vehicle, start a job at a marker
+- **F** punch · **Left mouse** shoot · **R** reload · **Esc** pause · **M** minimap detail
 
-## Controls
+## What's in the city
 
-- **W A S D** — move on foot / drive
-- **Mouse** — orbit camera · **Click** — shoot
-- **E** — enter / exit vehicle (also retries a failed mission)
-- **F** — punch
-- **Enter** — start · **P** — pause · **Esc** — menu
+- **Maravela** — a seeded 10×10-block coastal city: Glassline towers, Sunwash Beach, Pelican Marina, Foundry Quay, Palm Court homes and the Civic Crescent, with an ocean, beach, docks and ~250 buildings, ~100 palms and street lamps, all procedural (three.js r160, vendored under `game/vendor/`).
+- **Driving** — five models (Morrow Compact, Sunbird Cab, Kestrel R, Docksider truck, Civic Sentinel cruiser) with arcade handling, chase camera and parked-car colliders.
+- **Traffic & pedestrians** — ~30 ambient cars that follow lanes, slow and stop behind traffic, and ~60 pedestrians on sidewalk routes who flee fast vehicles.
+- **Wanted system** — 0–5 stars; witnessed crime escalates the response, police pursue on road routes, and breaking line of sight lets the heat cool.
+- **Missions** — four timed jobs: First Light Run, Harbour Receipt, Wrong Turn Right Friend, Last Ferry Window — each with a HUD objective banner, route marker and cash reward.
+- **Combat & health** — punch and hitscan shooting, health pickups, recovery flow on flatline.
+- **HUD, save & audio** — health/cash/stars/speed/clock, dark street-map minimap with police dots, localStorage save, Web Audio synth (oscillators/noise only, no files).
 
-## Systems
+## Run the entry
 
-- **City** — seeded 10×10-block coastal city, ~250 buildings, palms, beach and marina, warm sunset light
-- **Driving** — 5 car models, arcade handling, chase camera; steal any car with E
-- **Traffic & pedestrians** — 26 traffic cars + 55 pedestrians with sidewalk loops
-- **Wanted & police** — 0–5 stars; crimes are witnessed and reported, cruisers pursue and ram, escape to cool off
-- **Missions & story** — 4 story missions (First Light Run, Harbour Receipt, Wrong Turn, Last Ferry) with timers, gold beacons and dialogue from Mara
-- **Combat** — punches and hitscan shooting, pedestrians react and recover
-- **HUD & minimap** — health, cash, wanted stars, clock, speed, live minimap with police and mission markers
-- **Save** — progress saves locally and loads back
+```sh
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+```
+
+`main.ts` copies `game/` and `screenshots/` to the output directory and writes `dossier.json` with the vendored make.fun library (`vendor/makefun-game.ts`, kit copy, unchanged). It resolves every path from its own directory, so it also works grader-style: `cd / && node <path>/main.ts`.
 
 ## Layout
 
-- `game/` — the game itself (`index.html`, `src/*.js`, `vendor/three.min.js`)
-- `screenshots/` — real renders of the game's own code
-- `main.ts` — Node 22 entry: copies `game/` + `screenshots/` to `/output` and writes `dossier.json`
-- `vendor/makefun-game.ts` — kit file, unchanged
+```
+game/
+  index.html            # page + HUD DOM, loads src/main.js as a module
+  vendor/ three.min.js  # three.js r160, vendored
+  src/ main.js world.js player.js vehicles.js traffic.js
+       police.js missions.js combat.js hud.js audio.js save.js shots.js style.css
+main.ts  serve.ts  README.md  screenshots/ (4 jpgs, first by name is the cover)
+```
+
+All city, character, vehicle, story and art names are invented for this game; no Rockstar Games names, logos, characters, maps or assets are used.

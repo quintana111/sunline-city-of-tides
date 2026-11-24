@@ -1,328 +1,109 @@
-import * as THREE from 'three';
+// player.js — Nia Solis, on-foot movement + third-person camera.
+// Heading convention (authoritative): forward = (sin h, 0, -cos h);
+// mesh rotation.y = -heading. The figure's front is local -Z.
 
-const PLAYER_RADIUS = 0.6;
-const WALK_SPEED = 4.2;
-const RUN_SPEED = 7.2;
-const CAMERA_SENSITIVITY = 0.0028;
+import * as THREE from '../vendor/three.min.js';
+import { hitsCollider, clampToCity } from './world.js';
 
-function getOrCreatePlayerState(world) {
-  const state = world.state;
-  if (!state.player) {
-    state.player = {
-      pos: { x: 0, y: 0, z: 0 },
-      vel: { x: 0, y: 0, z: 0 },
-      heading: 0,
-      onFoot: true,
-      health: 100,
-      cash: 250
-    };
-  }
-  const player = state.player;
-  player.pos ??= { x: 0, y: 0, z: 0 };
-  player.vel ??= { x: 0, y: 0, z: 0 };
-  player.heading ??= 0;
-  player.onFoot ??= true;
-  return player;
-}
+export const WALK_SPEED = 4.2;
+export const RUN_SPEED = 7.2;
+export const JUMP_IMPULSE = 7.0;
+export const GRAVITY = 20;
 
-function makeBox(parent, material, x, y, z, width, height, depth) {
+function part(w, h, d, color, x, y, z) {
   const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(width, height, depth),
-    material
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshLambertMaterial({ color }),
   );
   mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  parent.add(mesh);
   return mesh;
 }
 
-function clampPointToCity(world, x, z) {
-  let result = null;
-  if (typeof world.clampToCity === 'function') {
-    result = world.clampToCity(x, z);
-  }
-
-  if (Array.isArray(result)) {
-    x = Number.isFinite(result[0]) ? result[0] : x;
-    z = Number.isFinite(result[1]) ? result[1] : z;
-  } else if (result && typeof result === 'object') {
-    x = Number.isFinite(result.x) ? result.x : x;
-    z = Number.isFinite(result.z) ? result.z : z;
-  }
-
-  // The coast is walkable sand; only the ocean beyond it is out of bounds.
-  z = Math.min(z, 680);
-  return { x, z };
-}
-
-function pushOutOfBuildings(world, x, z, radius) {
-  for (const building of world.buildings ?? []) {
-    const minX = building.x - building.w / 2 - radius;
-    const maxX = building.x + building.w / 2 + radius;
-    const minZ = building.z - building.d / 2 - radius;
-    const maxZ = building.z + building.d / 2 + radius;
-
-    if (x <= minX || x >= maxX || z <= minZ || z >= maxZ) continue;
-
-    const left = x - minX;
-    const right = maxX - x;
-    const near = z - minZ;
-    const far = maxZ - z;
-    const smallest = Math.min(left, right, near, far);
-
-    if (smallest === left) x = minX;
-    else if (smallest === right) x = maxX;
-    else if (smallest === near) z = minZ;
-    else z = maxZ;
-  }
-  return { x, z };
-}
-
-export function createPlayer(scene, world, camera) {
-  const player = getOrCreatePlayerState(world);
+// Build the low-poly figure: teal jacket, cream shirt, dark trousers,
+// coral accent, small hair block. No detailed face.
+export function createPlayer(scene, world) {
   const group = new THREE.Group();
-  group.name = 'Nia Solis';
+  group.name = 'player';
 
-  const teal = new THREE.MeshStandardMaterial({
-    color: 0x167f82,
-    roughness: 0.88
-  });
-  const cream = new THREE.MeshStandardMaterial({
-    color: 0xf1e5c9,
-    roughness: 0.9
-  });
-  const trousers = new THREE.MeshStandardMaterial({
-    color: 0x27313d,
-    roughness: 0.95
-  });
-  const coral = new THREE.MeshStandardMaterial({
-    color: 0xe77768,
-    roughness: 0.85
-  });
-  const skin = new THREE.MeshStandardMaterial({
-    color: 0xc88f70,
-    roughness: 0.9
-  });
-  const face = new THREE.MeshStandardMaterial({
-    color: 0x28262b,
-    roughness: 1
-  });
+  const legs = part(0.34, 0.72, 0.34, 0x2c3242, -0.14, 0.36, 0);
+  const legs2 = part(0.34, 0.72, 0.34, 0x2c3242, 0.14, 0.36, 0);
+  const torso = part(0.62, 0.72, 0.36, 0x1f8a8a, 0, 1.08, 0); // teal jacket
+  const shirt = part(0.4, 0.5, 0.38, 0xf2ead8, 0, 1.06, 0); // cream shirt front
+  const armL = part(0.2, 0.62, 0.2, 0x1f8a8a, -0.42, 1.08, 0);
+  const armR = part(0.2, 0.62, 0.2, 0x1f8a8a, 0.42, 1.08, 0);
+  const head = part(0.42, 0.42, 0.4, 0xd9a986, 0, 1.68, 0);
+  const hair = part(0.46, 0.2, 0.44, 0x2e2118, 0, 1.92, 0.02);
+  const cap = part(0.48, 0.1, 0.46, 0xff6f61, 0, 1.99, 0); // coral accent
+  group.add(legs, legs2, torso, shirt, armL, armR, head, hair, cap);
+  group.traverse((m) => { if (m.isMesh) m.castShadow = false; });
 
-  makeBox(group, teal, 0, 1.15, 0, 0.62, 0.62, 0.32);
-  makeBox(group, cream, 0, 1.18, -0.171, 0.22, 0.46, 0.025);
-
-  const leftLeg = new THREE.Group();
-  leftLeg.position.set(-0.17, 0.69, 0);
-  group.add(leftLeg);
-  makeBox(leftLeg, trousers, 0, -0.02, 0, 0.22, 0.66, 0.25);
-  makeBox(leftLeg, coral, 0, -0.37, -0.035, 0.23, 0.13, 0.36);
-
-  const rightLeg = new THREE.Group();
-  rightLeg.position.set(0.17, 0.69, 0);
-  group.add(rightLeg);
-  makeBox(rightLeg, trousers, 0, -0.02, 0, 0.22, 0.66, 0.25);
-  makeBox(rightLeg, coral, 0, -0.37, -0.035, 0.23, 0.13, 0.36);
-
-  const leftArm = new THREE.Group();
-  leftArm.position.set(-0.39, 1.35, 0);
-  group.add(leftArm);
-  makeBox(leftArm, teal, 0, -0.24, 0, 0.18, 0.5, 0.22);
-
-  const rightArm = new THREE.Group();
-  rightArm.position.set(0.39, 1.35, 0);
-  group.add(rightArm);
-  makeBox(rightArm, teal, 0, -0.24, 0, 0.18, 0.5, 0.22);
-
-  makeBox(group, skin, 0, 1.65, 0, 0.34, 0.38, 0.32);
-  makeBox(group, coral, 0, 1.84, 0.015, 0.36, 0.12, 0.35);
-  makeBox(group, coral, 0, 1.73, 0.145, 0.36, 0.14, 0.08);
-  makeBox(group, face, 0, 1.65, -0.166, 0.2, 0.12, 0.018);
-
-  group.position.set(player.pos.x, player.pos.y ?? 0, player.pos.z);
-  group.rotation.y = -player.heading;
   scene.add(group);
 
-  let camYaw = 0;
-  let camPitch = 0.38;
-  let cameraInitialized = false;
-  let verticalVelocity = player.vel.y ?? 0;
-  let walkPhase = 0;
-
-  function setPosition(x, z) {
-    const clamped = clampPointToCity(world, x, z);
-    const resolved = pushOutOfBuildings(
-      world,
-      clamped.x,
-      clamped.z,
-      PLAYER_RADIUS
-    );
-    player.pos.x = resolved.x;
-    player.pos.y = 0;
-    player.pos.z = resolved.z;
-    player.vel.x = 0;
-    player.vel.z = 0;
-    group.position.set(resolved.x, 0, resolved.z);
-  }
-
-  function respawn() {
-    const spawn = world.spawnPoints?.player;
-    const x = Number.isFinite(spawn?.x) ? spawn.x : 0;
-    const z = Number.isFinite(spawn?.z) ? spawn.z : 0;
-
-    if (world.state.currentVehicle) {
-      world.state.currentVehicle = null;
-    }
-    player.onFoot = true;
-    player.heading = Number.isFinite(spawn?.heading) ? spawn.heading : 0;
-    verticalVelocity = 0;
-    player.vel.y = 0;
-    group.visible = true;
-    setPosition(x, z);
-    group.rotation.y = -player.heading;
-    cameraInitialized = false;
-  }
-
-  function updateCamera(dt) {
-    if (!camera) return;
-
-    const target = new THREE.Vector3(player.pos.x, 1.6, player.pos.z);
-    const horizontal = 8 * Math.cos(camPitch);
-    const desired = new THREE.Vector3(
-      player.pos.x - Math.sin(camYaw) * horizontal,
-      player.pos.y + 1.6 + 8 * Math.sin(camPitch),
-      player.pos.z + Math.cos(camYaw) * horizontal
-    );
-
-    if (!cameraInitialized) {
-      camera.position.copy(desired);
-      cameraInitialized = true;
-    } else {
-      camera.position.lerp(desired, 1 - Math.exp(-8 * Math.max(0, dt)));
-    }
-    camera.lookAt(target);
-  }
-
-  function update(dt, input = {}, updateWorld = world) {
-    const state = updateWorld?.state ?? world.state;
-    const keys = input.keys ?? state.input?.keys ?? new Set();
-    const mouseDX = Number.isFinite(state.input?.mouseDX)
-      ? state.input.mouseDX
-      : Number.isFinite(input.mouseDX)
-        ? input.mouseDX
-        : 0;
-    const mouseDY = Number.isFinite(state.input?.mouseDY)
-      ? state.input.mouseDY
-      : Number.isFinite(input.mouseDY)
-        ? input.mouseDY
-        : 0;
-
-    if (!cameraInitialized && camera) {
-      camYaw = Math.atan2(
-        player.pos.x - camera.position.x,
-        camera.position.z - player.pos.z
-      );
-      cameraInitialized = true;
-    }
-
-    if (state.screen === 'play' && !state.paused && player.onFoot) {
-      camYaw += mouseDX * CAMERA_SENSITIVITY;
-      camPitch = THREE.MathUtils.clamp(
-        camPitch - mouseDY * CAMERA_SENSITIVITY,
-        -0.1,
-        1.1
-      );
-    }
-
-    if (!player.onFoot || state.currentVehicle !== null) {
-      group.visible = false;
-      updateCamera(dt);
-      return;
-    }
-    group.visible = true;
-
-    const active = state.screen === 'play' && !state.paused;
-    const safeDt = Math.min(Math.max(dt, 0), 0.05);
-
-    if (active) {
-      const forwardInput =
-        (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
-      const sideInput =
-        (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
-      const inputLength = Math.hypot(forwardInput, sideInput);
-      const normalize = inputLength > 1 ? 1 / inputLength : 1;
-      const speed = keys.has('ShiftLeft') || keys.has('ShiftRight')
-        ? RUN_SPEED
-        : WALK_SPEED;
-
-      const sin = Math.sin(camYaw);
-      const cos = Math.cos(camYaw);
-      const targetX =
-        (sideInput * cos + forwardInput * sin) * normalize * speed;
-      const targetZ =
-        (sideInput * sin - forwardInput * cos) * normalize * speed;
-      const acceleration = 1 - Math.exp(-12 * safeDt);
-
-      player.vel.x = THREE.MathUtils.lerp(player.vel.x, targetX, acceleration);
-      player.vel.z = THREE.MathUtils.lerp(player.vel.z, targetZ, acceleration);
-
-      if (
-        keys.has('Space') &&
-        Math.abs(verticalVelocity) < 0.001 &&
-        player.pos.y <= 0.001
-      ) {
-        verticalVelocity = 7;
-      }
-
-      verticalVelocity -= 20 * safeDt;
-      player.pos.y = Math.max(0, (player.pos.y ?? 0) + verticalVelocity * safeDt);
-      if (player.pos.y === 0 && verticalVelocity < 0) verticalVelocity = 0;
-
-      let nextX = player.pos.x + player.vel.x * safeDt;
-      let nextZ = player.pos.z + player.vel.z * safeDt;
-      const cityPoint = clampPointToCity(updateWorld, nextX, nextZ);
-      nextX = cityPoint.x;
-      nextZ = cityPoint.z;
-
-      const resolved = pushOutOfBuildings(
-        updateWorld,
-        nextX,
-        nextZ,
-        PLAYER_RADIUS
-      );
-      if (resolved.x !== nextX) player.vel.x = 0;
-      if (resolved.z !== nextZ) player.vel.z = 0;
-      player.pos.x = resolved.x;
-      player.pos.z = resolved.z;
-
-      const moving = Math.hypot(player.vel.x, player.vel.z) > 0.15;
-      if (moving) {
-        player.heading = Math.atan2(player.vel.x, -player.vel.z);
-        walkPhase += safeDt * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 12 : 8);
-      } else {
-        walkPhase += safeDt * 1.5;
-      }
-
-      const swing = moving ? Math.sin(walkPhase) * 0.55 : Math.sin(walkPhase) * 0.025;
-      leftLeg.rotation.x = swing;
-      rightLeg.rotation.x = -swing;
-      leftArm.rotation.x = -swing * 0.75;
-      rightArm.rotation.x = swing * 0.75;
-      group.position.set(player.pos.x, player.pos.y, player.pos.z);
-      group.rotation.y = -player.heading;
-    }
-
-    player.vel.y = verticalVelocity;
-    updateCamera(dt);
-  }
-
-  return {
+  const player = {
     group,
-    update,
-    setPosition,
-    respawn,
-    getCameraYaw() {
-      return camYaw;
-    }
+    legs, legs2, armL, armR,
+    camYaw: Math.PI, // camera looks north (-Z) at start; yaw = heading of view
+    camPitch: 0.32,
+    vy: 0,
+    grounded: true,
+    walkPhase: 0,
+    update(dt, input, w) { updatePlayer(player, dt, input, w); },
   };
+  return player;
+}
+
+function updatePlayer(player, dt, input, world) {
+  const state = world.state;
+  if (!state) return;
+  const p = state.player;
+  if (!p.onFoot) return; // driving: vehicles.js owns the position
+
+  const keys = input.keys;
+  const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const speed = run ? RUN_SPEED : WALK_SPEED;
+
+  // Movement is camera-relative: W walks away from the camera.
+  const yaw = player.camYaw;
+  const fwdX = Math.sin(yaw), fwdZ = -Math.cos(yaw);
+  const rightX = Math.cos(yaw), rightZ = Math.sin(yaw);
+  let mx = 0, mz = 0;
+  if (keys.has('KeyW')) { mx += fwdX; mz += fwdZ; }
+  if (keys.has('KeyS')) { mx -= fwdX; mz -= fwdZ; }
+  if (keys.has('KeyD')) { mx += rightX; mz += rightZ; }
+  if (keys.has('KeyA')) { mx -= rightX; mz -= rightZ; }
+  const len = Math.hypot(mx, mz);
+  let moving = false;
+  if (len > 0.001) {
+    mx /= len; mz /= len;
+    moving = true;
+    // Face the movement direction: forward = (sin h, 0, -cos h).
+    p.heading = Math.atan2(mx, -mz);
+    const nx = p.pos.x + mx * speed * dt;
+    const nz = p.pos.z + mz * speed * dt;
+    if (!hitsCollider(world, nx, p.pos.z, 0.55)) p.pos.x = clampToCity(nx, 40);
+    if (!hitsCollider(world, p.pos.x, nz, 0.55)) p.pos.z = clampToCity(nz, 40);
+    player.walkPhase += dt * speed * 1.6;
+  }
+
+  // Jump + gravity, ground clamp at y=0.
+  if (keys.has('Space') && player.grounded) {
+    player.vy = JUMP_IMPULSE;
+    player.grounded = false;
+  }
+  if (!player.grounded) {
+    player.vy -= GRAVITY * dt;
+    p.pos.y += player.vy * dt;
+    if (p.pos.y <= 0) { p.pos.y = 0; player.vy = 0; player.grounded = true; }
+  }
+
+  // Swing limbs while walking; idle sway otherwise.
+  const swing = moving ? Math.sin(player.walkPhase) * 0.55 : 0;
+  player.legs.rotation.x = swing;
+  player.legs2.rotation.x = -swing;
+  player.armL.rotation.x = -swing * 0.8;
+  player.armR.rotation.x = swing * 0.8;
+
+  player.group.position.set(p.pos.x, p.pos.y, p.pos.z);
+  player.group.rotation.y = -p.heading;
+  player.group.visible = true;
 }

@@ -1,224 +1,344 @@
-// Missions for Sunline: City of Tides — 4 jobs from Mara the dispatcher.
-// Forward = (sin h, 0, -cos h). No Math.random(). E-to-start wins over
-// vehicle E-to-enter: the actor position is the driven car when driving.
-import * as THREE from 'three';
+// missions.js — the four courier jobs of Sunline: City of Tides.
+// Fresh implementation from design-r3.md section 7.
+// E-to-start MUST WIN over E-to-enter a nearby vehicle: when update()
+// consumes E to start a mission it sets state.input._eConsumed = true,
+// which main.js honours before the vehicle layer runs.
+import * as THREE from '../vendor/three.min.js';
+
+const MARKER_RADIUS = 7;
+const ARRIVE_RADIUS = 6;
+
+export const MISSION_DEFS = {
+  'first-light': {
+    id: 'first-light', title: 'First Light Run', reward: 400, timeLimit: 150,
+    pickupKey: 'parcelPickup', dropKey: 'beachCafe',
+    pickupLabel: 'Palm Court', dropLabel: 'beachfront cafe',
+    stage1: 'Pick up the sealed parcel in Palm Court',
+    stage2: 'Deliver the parcel to the beachfront cafe',
+    intro: 'First Light Run: a sealed parcel, Palm Court to the beachfront cafe. 150 seconds. Go.',
+    pickupMsg: 'Parcel secured — get it to the beachfront cafe.',
+  },
+  'harbour-receipt': {
+    id: 'harbour-receipt', title: 'Harbour Receipt', reward: 550, timeLimit: 180,
+    pickupKey: 'marinaCrate', dropKey: 'foundryWorkshop',
+    pickupLabel: 'Pelican Marina', dropLabel: 'Foundry Quay workshop',
+    stage1: 'Collect the crate at Pelican Marina',
+    stage2: 'Deliver the crate to the Foundry Quay workshop',
+    intro: 'Harbour Receipt: a crate at the marina goes to a Foundry Quay workshop. Mind the witnesses.',
+    pickupMsg: 'Crate loaded — Foundry Quay, quick and quiet.',
+  },
+  'wrong-turn': {
+    id: 'wrong-turn', title: 'Wrong Turn, Right Friend', reward: 500, timeLimit: 240,
+    pickupKey: 'mechanic', dropKey: 'safehouse',
+    pickupLabel: 'Civic Crescent', dropLabel: 'Palm Court safehouse',
+    stage1: 'Pick up the stranded mechanic near Civic Crescent',
+    stage2: 'Deliver your friend to the Palm Court safehouse',
+    intro: 'Wrong Turn, Right Friend: a mechanic is stranded near Civic Crescent — and the law is already looking.',
+    pickupMsg: 'Mechanic aboard — lose the search, reach the safehouse.',
+  },
+  'last-ferry': {
+    id: 'last-ferry', title: 'Last Ferry Window', reward: 650, timeLimit: 210,
+    pickupKey: 'ferryContact', dropKey: 'marinaGate',
+    pickupLabel: 'marina road', dropLabel: 'marina gate',
+    stage1: 'Pick up your contact near the marina road',
+    stage2: 'Bring your contact to the marina gate before the last ferry',
+    intro: 'Last Ferry Window: get a contact to the marina gate before final boarding. No trouble, no heat.',
+    pickupMsg: 'Contact aboard — the last ferry will not wait.',
+  },
+};
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function pointInsideBuilding(world, x, z, margin) {
+  const list = world.colliders || [];
+  for (const c of list) {
+    const hw = (c.hw !== undefined ? c.hw : (c.w || 0) / 2) + margin;
+    const hd = (c.hd !== undefined ? c.hd : (c.d || 0) / 2) + margin;
+    if (Math.abs(x - c.x) < hw && Math.abs(z - c.z) < hd) return true;
+  }
+  return false;
+}
+
+// Nudge a point that fell inside a building (or off the map / onto the
+// beach edge) to the nearest clear ground, scanning outward in rings.
+export function resolvePoint(world, x, z) {
+  const clear = (px, pz) => {
+    if (px < -610 || px > 610 || pz < -610 || pz > 556) return false;
+    return !pointInsideBuilding(world, px, pz, 2);
+  };
+  if (clear(x, z)) return { x, z };
+  for (let r = 4; r <= 56; r += 4) {
+    for (let k = 0; k < 16; k++) {
+      const a = (k / 16) * Math.PI * 2;
+      const px = x + Math.cos(a) * r;
+      const pz = z + Math.sin(a) * r;
+      if (clear(px, pz)) return { x: Math.round(px * 10) / 10, z: Math.round(pz * 10) / 10 };
+    }
+  }
+  return { x, z };
+}
+
+function readPoint(world, key) {
+  const mp = world.missionPoints || {};
+  const p = mp[key];
+  if (!p) return null;
+  const x = p.x !== undefined ? p.x : 0;
+  const z = p.z !== undefined ? p.z : (p.y !== undefined ? p.y : 0);
+  return { x, z };
+}
+
+function beaconMaterial(color, opacity) {
+  return new THREE.MeshBasicMaterial({ color, transparent: true, opacity, fog: false });
+}
 
 export function createMissions(scene, world, state, vehicleManager, police) {
-  const missionDefs = {
-    'first-light': {
-      id: 'first-light', title: 'First Light Run', reward: 350, timeLimit: 150,
-      briefing: 'A parcel needs a quick ride to Café Lumen. Keep it smooth, Nia.',
-      stages: [
-        { point: 'parcelPickup', objective: 'Pick up the parcel — Parcel Pickup', label: 'Parcel Pickup' },
-        { point: 'cafeDropoff', objective: 'Deliver the parcel to Café Lumen', label: 'Café Lumen' },
-      ],
-    },
-    'harbour-receipt': {
-      id: 'harbour-receipt', title: 'Harbour Receipt', reward: 500, timeLimit: 240,
-      briefing: 'A crate is waiting at the marina. Take it to the Foundry Workshop.',
-      stages: [
-        { point: 'marinaCrate', objective: 'Collect the crate — Marina Crate', label: 'Marina Crate' },
-        { point: 'workshopDropoff', objective: 'Deliver the crate to the Foundry Workshop', label: 'Foundry Workshop' },
-      ],
-    },
-    'wrong-turn': {
-      id: 'wrong-turn', title: 'Wrong Turn, Right Friend', reward: 600, timeLimit: 240,
-      briefing: 'A stranded mechanic needs a lift. The search is already underway.',
-      stages: [
-        { point: 'mechanicPickup', objective: 'Pick up the stranded mechanic — Civic Crescent', label: 'Civic Crescent' },
-        { point: 'safehouse', objective: 'Drive the mechanic to the Safehouse', label: 'Safehouse' },
-      ],
-    },
-    'last-ferry': {
-      id: 'last-ferry', title: 'Last Ferry Window', reward: 800, timeLimit: 200,
-      briefing: 'Bring the contact to the Ferry Dock before the last boarding.',
-      stages: [
-        { point: 'ferryDock', objective: 'Bring the contact to the Ferry Dock before the last boarding', label: 'Ferry Dock' },
-      ],
-    },
-  };
+  const defs = MISSION_DEFS;
+  const active = { id: null, def: null, stage: 0, timeLeft: 0, target: null, pickup: null, drop: null };
+  const completed = [];
+  let lastE = false;
+  let lastEPressed = false;
+  let lastVehicle = null;
+  let dialogueT = 0;
 
-  const emptyMission = () => ({ id: null, title: '', objective: '', stage: 0 });
-  if (!state.mission) state.mission = emptyMission();
-
-  const gold = new THREE.MeshStandardMaterial({
-    color: 0xd49a21, emissive: 0xffb51b, emissiveIntensity: 1.25, metalness: 0.2, roughness: 0.38,
-  });
-  const goldDim = new THREE.MeshStandardMaterial({
-    color: 0x9c701a, emissive: 0xffa800, emissiveIntensity: 0.65, metalness: 0.15, roughness: 0.45,
-  });
-
-  // Target beacon: kept compact (top ~3.5) so it never dominates the frame.
-  const markerGroup = new THREE.Group();
-  markerGroup.visible = false;
-  markerGroup.name = 'mission-target-marker';
-  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.7, 2.4, 16), gold);
-  shaft.position.y = 1.2;
-  markerGroup.add(shaft);
-  const cone = new THREE.Mesh(new THREE.ConeGeometry(0.62, 1.15, 16), gold);
-  cone.position.y = 2.95;
-  markerGroup.add(cone);
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(2.15, 0.12, 8, 32), goldDim);
+  // --- marker meshes -------------------------------------------------
+  const beacon = new THREE.Group();
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.7, 0.7, 9, 12, 1, true),
+    beaconMaterial(0xffc93c, 0.45),
+  );
+  beam.position.y = 4.5;
+  beacon.add(beam);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(2.6, 3.5, 32),
+    beaconMaterial(0xffc93c, 0.85),
+  );
   ring.rotation.x = -Math.PI / 2;
-  ring.position.y = 0.08;
-  markerGroup.add(ring);
-  scene?.add?.(markerGroup);
+  ring.position.y = 0.12;
+  beacon.add(ring);
+  beacon.visible = false;
+  scene.add(beacon);
 
-  const startMarkers = [];
-  for (const definition of Object.values(missionDefs)) {
-    const point = world?.missionPoints?.[definition.stages[0].point];
-    if (!point) continue;
-    const diamond = new THREE.Mesh(new THREE.OctahedronGeometry(0.62, 0), goldDim);
-    diamond.name = `mission-start-${definition.id}`;
-    diamond.position.set(point.x, 1.35, point.z);
-    diamond.rotation.y = Math.PI / 4;
-    scene?.add?.(diamond);
-    startMarkers.push(diamond);
+  // Dim ground rings at every job start while free-roaming, so the player
+  // can find work without opening anything.
+  const idleMarkers = [];
+  for (const id of Object.keys(defs)) {
+    const raw = readPoint(world, defs[id].pickupKey);
+    if (!raw) continue;
+    const at = resolvePoint(world, raw.x, raw.z);
+    const g = new THREE.Group();
+    const post = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.28, 0.28, 2.6, 8),
+      beaconMaterial(0x7fd4c1, 0.7),
+    );
+    post.position.y = 1.3;
+    g.add(post);
+    const base = new THREE.Mesh(
+      new THREE.RingGeometry(2.2, 3.0, 24),
+      beaconMaterial(0x7fd4c1, 0.6),
+    );
+    base.rotation.x = -Math.PI / 2;
+    base.position.y = 0.1;
+    g.add(base);
+    g.position.set(at.x, 0, at.z);
+    g.userData.missionId = id;
+    g.userData.point = at;
+    scene.add(g);
+    idleMarkers.push(g);
   }
 
-  let prevE = false;
-  const safeDt = (dt) => Math.min(Math.max(Number.isFinite(dt) ? dt : 0, 0), 0.1);
+  function say(text, ms) {
+    state._dialogue = { text, until: Date.now() + (ms || 4500) };
+  }
 
-  const targetFor = (definition, stage) => {
-    const stageInfo = definition?.stages?.[stage];
-    const point = stageInfo && world?.missionPoints?.[stageInfo.point];
-    if (!stageInfo || !point) return null;
-    return { x: point.x, z: point.z, label: point.label ?? stageInfo.label };
-  };
-
-  const syncMarkers = () => {
-    const active = Boolean(state.mission?.id);
-    markerGroup.visible = active && Boolean(state.mission?.target);
-    if (markerGroup.visible) {
-      markerGroup.position.set(state.mission.target.x, 0, state.mission.target.z);
+  function writeMission() {
+    if (!active.def) {
+      state.mission = { id: null, title: '', objective: '', stage: 0 };
+      state._missionTimeLeft = 0;
+      state._missionTarget = null;
+    } else {
+      state.mission = {
+        id: active.def.id,
+        title: active.def.title,
+        objective: active.stage === 1 ? active.def.stage1 : active.def.stage2,
+        stage: active.stage,
+      };
+      state._missionTimeLeft = Math.max(0, Math.ceil(active.timeLeft));
+      state._missionTarget = active.target ? { x: active.target.x, z: active.target.z } : null;
     }
-    for (const marker of startMarkers) marker.visible = !active;
-  };
+  }
 
-  const actorPosition = () => {
-    const pos = state.currentVehicle?.pos ?? state.player?.pos;
-    return {
-      x: Number.isFinite(pos?.x) ? pos.x : 0,
-      z: Number.isFinite(pos?.z) ? pos.z : 0,
-    };
-  };
-
-  const setStage = (mission, stage, message) => {
-    const definition = missionDefs[mission.id];
-    const info = definition?.stages?.[stage];
-    const target = targetFor(definition, stage);
-    if (!info || !target) return false;
-    mission.stage = stage;
-    mission.objective = info.objective;
-    mission.target = target;
-    mission.marker = { x: target.x, z: target.z, label: target.label };
-    mission.message = { speaker: 'Mara', text: message };
-    mission.failed = false;
-    syncMarkers();
-    return true;
-  };
+  function refreshMarkers() {
+    beacon.visible = !!active.def;
+    if (active.def && active.target) {
+      beacon.position.set(active.target.x, 0, active.target.z);
+    }
+    for (const g of idleMarkers) g.visible = !active.def;
+  }
 
   function startMission(id) {
-    const definition = missionDefs[id];
-    if (!definition) return false;
-    const target = targetFor(definition, 0);
-    if (!target) return false;
-    state.mission = {
-      id: definition.id,
-      title: definition.title,
-      objective: definition.stages[0].objective,
-      stage: 0,
-      timeLeft: definition.timeLimit,
-      target,
-      marker: { x: target.x, z: target.z, label: target.label },
-      reward: definition.reward,
-      message: { speaker: 'Mara', text: definition.briefing },
-      failed: false,
-    };
-    syncMarkers();
-    if (id === 'wrong-turn') police?.setWanted?.(1);
+    const def = defs[id];
+    if (!def || active.def) return false;
+    const rawPickup = readPoint(world, def.pickupKey);
+    const rawDrop = readPoint(world, def.dropKey);
+    if (!rawPickup || !rawDrop) return false;
+    active.def = def;
+    active.id = id;
+    active.stage = 1;
+    active.timeLeft = def.timeLimit;
+    active.pickup = resolvePoint(world, rawPickup.x, rawPickup.z);
+    active.drop = resolvePoint(world, rawDrop.x, rawDrop.z);
+    active.target = active.pickup;
+    // Wrong Turn starts with a low-level search already in progress.
+    if (id === 'wrong-turn' && police && police.setWanted) police.setWanted(1);
+    writeMission();
+    refreshMarkers();
+    say(def.intro, 5000);
     return true;
   }
 
   function resetMission() {
-    state.mission = emptyMission();
-    syncMarkers();
+    active.def = null;
+    active.id = null;
+    active.stage = 0;
+    active.timeLeft = 0;
+    active.target = null;
+    active.pickup = null;
+    active.drop = null;
+    writeMission();
+    refreshMarkers();
+    state._missionPrompt = '';
+    return true;
   }
 
-  function getMissionState() {
-    const mission = state.mission ?? emptyMission();
-    return {
-      id: mission.id ?? null,
-      title: mission.title ?? '',
-      objective: mission.objective ?? '',
-      stage: Number.isFinite(mission.stage) ? mission.stage : 0,
-      timeLeft: Number.isFinite(mission.timeLeft) ? mission.timeLeft : null,
-      target: mission.target
-        ? { x: mission.target.x, z: mission.target.z, label: mission.target.label }
-        : null,
-      failed: Boolean(mission.failed),
-    };
+  function completeMission() {
+    const def = active.def;
+    state.player.cash += def.reward;
+    completed.push(def.id);
+    say(`Job done — ${def.title} paid $${def.reward}.`, 5000);
+    resetMission();
+  }
+
+  function failMission(reason) {
+    say(reason || 'Job failed — the window closed. Free roam continues.', 5000);
+    resetMission();
+  }
+
+  function nearestPickup() {
+    const p = state.player.pos;
+    let best = null;
+    let bestD = Infinity;
+    for (const g of idleMarkers) {
+      const d = Math.hypot(p.x - g.userData.point.x, p.z - g.userData.point.z);
+      if (d < bestD) { bestD = d; best = g; }
+    }
+    return bestD <= MARKER_RADIUS ? { marker: best, dist: bestD } : null;
+  }
+
+  function edgePressed(input) {
+    if (!input) return false;
+    const keys = input.keys;
+    const held = keys && typeof keys.has === 'function' ? keys.has('KeyE') : false;
+    const flag = input._ePressed === true && !lastEPressed;
+    lastEPressed = input._ePressed === true;
+    const edge = held && !lastE;
+    lastE = held;
+    return flag || edge;
   }
 
   function update(dt, input) {
-    const step = safeDt(dt);
-    const keys = input?.keys ?? state?.input?.keys;
-    const eDown = keys instanceof Set ? keys.has('KeyE') : Boolean(keys?.KeyE);
-    const ePressed = eDown && !prevE;
-    prevE = eDown;
+    if (!dt || dt <= 0) dt = 0.016;
+    dt = Math.min(dt, 0.05);
+    const inp = input || state.input || {};
+    if (state.screen !== 'play') { lastE = !!(inp.keys && inp.keys.has && inp.keys.has('KeyE')); return; }
+    const pressed = edgePressed(inp);
 
-    syncMarkers();
-    if (state?.screen !== 'play') return;
-
-    const mission = state.mission;
-    const active = Boolean(mission?.id);
-    const actor = actorPosition();
-
-    if (!active) {
-      if (ePressed) {
-        for (const definition of Object.values(missionDefs)) {
-          const target = targetFor(definition, 0);
-          if (target && Math.hypot(actor.x - target.x, actor.z - target.z) <= 7 &&
-              startMission(definition.id)) return;
+    // Witnessed theft: taking a car in view of a pedestrian is a crime.
+    // (The police hook covers the same event; this path only fires when a
+    // mission is running and the theft happens right in front of someone.)
+    const cur = state.currentVehicle || null;
+    if (cur && cur !== lastVehicle && police && police.reportCrime) {
+      let witness = false;
+      try {
+        const g = globalThis.__game;
+        const peds = g && g.traffic ? g.traffic.peds : [];
+        for (const ped of peds || []) {
+          const px = ped.x !== undefined ? ped.x : (ped.mesh ? ped.mesh.position.x : 0);
+          const pz = ped.z !== undefined ? ped.z : (ped.mesh ? ped.mesh.position.z : 0);
+          if (Math.hypot(px - state.player.pos.x, pz - state.player.pos.z) <= 25) { witness = true; break; }
         }
+      } catch (e) { /* no live game */ }
+      if (witness) police.reportCrime('vehicleTheft', { x: state.player.pos.x, z: state.player.pos.z }, 25);
+    }
+    lastVehicle = cur;
+
+    if (!active.def) {
+      const near = nearestPickup();
+      if (near) {
+        const def = defs[near.marker.userData.missionId];
+        state._missionPrompt = `E — start job: ${def.title}`;
+        if (pressed) {
+          if (startMission(def.id)) {
+            // E-to-start WINS over E-to-enter: tell the vehicle layer
+            // this keypress is already spent.
+            inp._eConsumed = true;
+            if (state.input) state.input._eConsumed = true;
+            state._missionPrompt = '';
+          }
+        }
+      } else {
+        state._missionPrompt = '';
       }
       return;
     }
 
-    if (mission.failed) {
-      if (ePressed) startMission(mission.id);
+    // Active mission: countdown, then arrival checks.
+    active.timeLeft -= dt;
+    state._missionTimeLeft = Math.max(0, Math.ceil(active.timeLeft));
+    if (active.timeLeft <= 0) {
+      failMission('Time up — the job fell through. The client moved on.');
       return;
     }
-
-    mission.timeLeft = Math.max(0, (Number(mission.timeLeft) || 0) - step);
-    if (mission.timeLeft <= 0) {
-      mission.failed = true;
-      mission.stage = -1;
-      mission.message = { speaker: 'Mara', text: 'Out of time — press E to try again.' };
-      syncMarkers();
-      return;
+    const p = state.player.pos;
+    const t = active.target;
+    if (t && Math.hypot(p.x - t.x, p.z - t.z) <= ARRIVE_RADIUS) {
+      if (active.stage === 1) {
+        active.stage = 2;
+        active.target = active.drop;
+        writeMission();
+        refreshMarkers();
+        say(active.def.pickupMsg, 4500);
+      } else if (active.stage === 2) {
+        completeMission();
+        return;
+      }
     }
-
-    const target = mission.target;
-    if (!target || Math.hypot(actor.x - target.x, actor.z - target.z) > 6) return;
-
-    const definition = missionDefs[mission.id];
-    const nextStage = mission.stage + 1;
-    if (definition && nextStage < definition.stages.length) {
-      const next = definition.stages[nextStage];
-      setStage(mission, nextStage, `Got it — now ${next.objective}.`);
-      return;
+    // Keep the beacon gently visible from afar.
+    if (beacon.visible) {
+      dialogueT += dt;
+      const s = 1 + Math.sin(dialogueT * 2.4) * 0.08;
+      beacon.scale.set(s, 1, s);
     }
-
-    const reward = Number(mission.reward) || 0;
-    const title = mission.title;
-    state.player.cash = (Number(state.player.cash) || 0) + reward;
-    state.mission = emptyMission();
-    state.mission.toast = `${title} complete — +$${reward}`;
-    state.mission.message = { speaker: 'Mara', text: 'Clean run. The money is yours.' };
-    syncMarkers();
   }
 
-  syncMarkers();
-  return { update, startMission, resetMission, getMissionState };
+  function getMissionState() {
+    return {
+      active: !!active.def,
+      id: active.def ? active.def.id : null,
+      title: active.def ? active.def.title : '',
+      stage: active.stage,
+      timeLeft: active.def ? Math.max(0, Math.ceil(active.timeLeft)) : 0,
+      target: active.target ? { x: active.target.x, z: active.target.z } : null,
+      pickup: active.pickup ? { x: active.pickup.x, z: active.pickup.z } : null,
+      drop: active.drop ? { x: active.drop.x, z: active.drop.z } : null,
+      completed: completed.slice(),
+    };
+  }
+
+  writeMission();
+  refreshMarkers();
+  return {
+    update, startMission, resetMission, getMissionState,
+    defs, resolvePoint: (x, z) => resolvePoint(world, x, z),
+    beacon, idleMarkers,
+  };
 }
